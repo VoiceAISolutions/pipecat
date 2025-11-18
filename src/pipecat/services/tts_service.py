@@ -142,6 +142,7 @@ class TTSService(AIService):
         self._voice_id: str = ""
         self._settings: Dict[str, Any] = {}
         self._text_aggregator: BaseTextAggregator = text_aggregator or SimpleTextAggregator()
+        self._aggregated_text_includes_inter_frame_spaces: bool = False
         self._text_filters: Sequence[BaseTextFilter] = text_filters or []
         self._transport_destination: Optional[str] = transport_destination
         self._tracing_enabled: bool = False
@@ -352,9 +353,16 @@ class TTSService(AIService):
             await self._maybe_pause_frame_processing()
 
             sentence = self._text_aggregator.text
+            includes_inter_frame_spaces = self._aggregated_text_includes_inter_frame_spaces
+
+            # Reset aggregator state
             await self._text_aggregator.reset()
             self._processing_text = False
-            await self._push_tts_frames(sentence)
+            self._aggregated_text_includes_inter_frame_spaces = False
+
+            await self._push_tts_frames(
+                sentence, includes_inter_frame_spaces=includes_inter_frame_spaces
+            )
             if isinstance(frame, LLMFullResponseEndFrame):
                 if self._push_text_frames:
                     await self.push_frame(frame, direction)
@@ -363,7 +371,8 @@ class TTSService(AIService):
         elif isinstance(frame, TTSSpeakFrame):
             # Store if we were processing text or not so we can set it back.
             processing_text = self._processing_text
-            await self._push_tts_frames(frame.text)
+            # Assumption: text in TTSSpeakFrame does not include inter-frame spaces
+            await self._push_tts_frames(frame.text, includes_inter_frame_spaces=False)
             # We pause processing incoming frames because we are sending data to
             # the TTS. We pause to avoid audio overlapping.
             await self._maybe_pause_frame_processing()
@@ -457,11 +466,17 @@ class TTSService(AIService):
             text = frame.text
         else:
             text = await self._text_aggregator.aggregate(frame.text)
+            # Assumption: whether inter-frame spaces are included shouldn't
+            # change during aggregation, so we can just use the latest frame's
+            # value
+            self._aggregated_text_includes_inter_frame_spaces = frame.includes_inter_frame_spaces
 
         if text:
-            await self._push_tts_frames(text)
+            await self._push_tts_frames(
+                text, includes_inter_frame_spaces=frame.includes_inter_frame_spaces
+            )
 
-    async def _push_tts_frames(self, text: str):
+    async def _push_tts_frames(self, text: str, includes_inter_frame_spaces: bool):
         # Remove leading newlines only
         text = text.lstrip("\n")
 
@@ -490,7 +505,9 @@ class TTSService(AIService):
         if self._push_text_frames:
             # We send the original text after the audio. This way, if we are
             # interrupted, the text is not added to the assistant context.
-            await self.push_frame(TTSTextFrame(text))
+            frame = TTSTextFrame(text)
+            frame.includes_inter_frame_spaces = includes_inter_frame_spaces
+            await self.push_frame(frame)
 
     async def _stop_frame_handler(self):
         has_started = False
@@ -616,6 +633,8 @@ class WordTTSService(TTSService):
                 frame = TTSStoppedFrame()
                 frame.pts = last_pts
             else:
+                # Assumption: word-by-word text frames don't include spaces, so
+                # we can rely on the default includes_inter_frame_spaces=False
                 frame = TTSTextFrame(word)
                 frame.pts = self._initial_word_timestamp + timestamp
             if frame:

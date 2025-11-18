@@ -28,7 +28,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.tts_service import AudioContextWordTTSService, TTSService
-from pipecat.transcriptions.language import Language
+from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.text.base_text_aggregator import BaseTextAggregator
 from pipecat.utils.text.skip_tags_aggregator import SkipTagsAggregator
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -77,35 +77,52 @@ def language_to_cartesia_language(language: Language) -> Optional[str]:
     Returns:
         The corresponding Cartesia language code, or None if not supported.
     """
-    BASE_LANGUAGES = {
+    LANGUAGE_MAP = {
+        Language.AR: "ar",
+        Language.BG: "bg",
+        Language.BN: "bn",
+        Language.CS: "cs",
+        Language.DA: "da",
         Language.DE: "de",
         Language.EN: "en",
+        Language.EL: "el",
         Language.ES: "es",
+        Language.FI: "fi",
         Language.FR: "fr",
+        Language.GU: "gu",
+        Language.HE: "he",
         Language.HI: "hi",
+        Language.HR: "hr",
+        Language.HU: "hu",
+        Language.ID: "id",
         Language.IT: "it",
         Language.JA: "ja",
+        Language.KA: "ka",
+        Language.KN: "kn",
         Language.KO: "ko",
+        Language.ML: "ml",
+        Language.MR: "mr",
+        Language.MS: "ms",
         Language.NL: "nl",
+        Language.NO: "no",
+        Language.PA: "pa",
         Language.PL: "pl",
         Language.PT: "pt",
+        Language.RO: "ro",
         Language.RU: "ru",
+        Language.SK: "sk",
         Language.SV: "sv",
+        Language.TA: "ta",
+        Language.TE: "te",
+        Language.TH: "th",
+        Language.TL: "tl",
         Language.TR: "tr",
+        Language.UK: "uk",
+        Language.VI: "vi",
         Language.ZH: "zh",
     }
 
-    result = BASE_LANGUAGES.get(language)
-
-    # If not found in base languages, try to find the base language from a variant
-    if not result:
-        # Convert enum value to string and get the base language part (e.g. es-ES -> es)
-        lang_str = str(language.value)
-        base_code = lang_str.split("-")[0].lower()
-        # Look up the base code in our supported languages
-        result = base_code if base_code in BASE_LANGUAGES.values() else None
-
-    return result
+    return resolve_language(language, LANGUAGE_MAP, use_base_code=True)
 
 
 class CartesiaTTSService(AudioContextWordTTSService):
@@ -380,7 +397,8 @@ class CartesiaTTSService(AudioContextWordTTSService):
             )
             await self._call_event_handler("on_connected")
         except Exception as e:
-            logger.error(f"{self} initialization error: {e}")
+            logger.error(f"{self} exception: {e}")
+            await self.push_error(ErrorFrame(error=f"{self} error: {e}"))
             self._websocket = None
             await self._call_event_handler("on_connection_error", f"{e}")
 
@@ -392,7 +410,8 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 logger.debug("Disconnecting from Cartesia")
                 await self._websocket.close()
         except Exception as e:
-            logger.error(f"{self} error closing websocket: {e}")
+            logger.error(f"{self} exception: {e}")
+            await self.push_error(ErrorFrame(error=f"{self} error: {e}"))
         finally:
             self._context_id = None
             self._websocket = None
@@ -448,7 +467,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 logger.error(f"{self} error: {msg}")
                 await self.push_frame(TTSStoppedFrame())
                 await self.stop_all_metrics()
-                await self.push_error(ErrorFrame(f"{self} error: {msg['error']}"))
+                await self.push_error(ErrorFrame(error=f"{self} error: {msg['error']}"))
                 self._context_id = None
             else:
                 logger.error(f"{self} error, unknown message type: {msg}")
@@ -489,7 +508,8 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 await self._get_websocket().send(msg)
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
-                logger.error(f"{self} error sending message: {e}")
+                logger.error(f"{self} exception: {e}")
+                yield ErrorFrame(error=f"{self} error: {e}")
                 yield TTSStoppedFrame()
                 await self._disconnect()
                 await self._connect()
@@ -497,6 +517,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
             yield None
         except Exception as e:
             logger.error(f"{self} exception: {e}")
+            yield ErrorFrame(error=f"{self} error: {e}")
 
 
 class CartesiaHttpTTSService(TTSService):
@@ -688,7 +709,7 @@ class CartesiaHttpTTSService(TTSService):
                 if response.status != 200:
                     error_text = await response.text()
                     logger.error(f"Cartesia API error: {error_text}")
-                    await self.push_error(ErrorFrame(f"Cartesia API error: {error_text}"))
+                    await self.push_error(ErrorFrame(error=f"Cartesia API error: {error_text}"))
                     raise Exception(f"Cartesia API returned status {response.status}: {error_text}")
 
                 audio_data = await response.read()
@@ -705,7 +726,7 @@ class CartesiaHttpTTSService(TTSService):
 
         except Exception as e:
             logger.error(f"{self} exception: {e}")
-            await self.push_error(ErrorFrame(f"Error generating TTS: {e}"))
+            await self.push_error(ErrorFrame(error=f"{self} error: {e}"))
         finally:
             await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()

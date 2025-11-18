@@ -63,7 +63,7 @@ You should use Google Search for:
 
 Always be proactive about using search when the user asks about anything that could benefit from real-time information.
 
-Your output will be converted to audio so don't include special characters in your answers.
+Your output will be spoken aloud, so avoid special characters that can't easily be spoken, such as emojis or bullet points.
 
 Respond to what the user said in a creative and helpful way, always using search for current information.
 """
@@ -127,12 +127,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # Set up conversation context and management
     context = LLMContext(messages)
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        # `expect_stripped_words=False` needed when Gemini Live used with AUDIO
-        #  modality (the default)
-        assistant_params=LLMAssistantAggregatorParams(expect_stripped_words=False),
-    )
+    context_aggregator = LLMContextAggregatorPair(context)
 
     pipeline = Pipeline(
         [

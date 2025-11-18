@@ -13,8 +13,6 @@ voice transcription, streaming responses, and tool usage.
 
 import base64
 import io
-import json
-import random
 import time
 import uuid
 import warnings
@@ -74,7 +72,7 @@ from pipecat.services.openai.llm import (
     OpenAIAssistantContextAggregator,
     OpenAIUserContextAggregator,
 )
-from pipecat.transcriptions.language import Language
+from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.string import match_endofsentence
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_gemini_live, traced_stt
@@ -133,7 +131,7 @@ def language_to_gemini_language(language: Language) -> Optional[str]:
     Returns:
         The Gemini language code string, or None if the language is not supported.
     """
-    language_map = {
+    LANGUAGE_MAP = {
         # Arabic
         Language.AR: "ar-XA",
         # Bengali
@@ -214,7 +212,8 @@ def language_to_gemini_language(language: Language) -> Optional[str]:
         Language.VI: "vi-VN",
         Language.VI_VN: "vi-VN",
     }
-    return language_map.get(language)
+
+    return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
 class GeminiLiveContext(OpenAILLMContext):
@@ -672,8 +671,8 @@ class GeminiLiveLLMService(LLMService):
         self._voice_id = voice_id
         self._language_code = params.language
 
-        self._system_instruction = system_instruction
-        self._tools = tools
+        self._system_instruction_from_init = system_instruction
+        self._tools_from_init = tools
         self._inference_on_context_initialization = inference_on_context_initialization
         self._needs_turn_complete_message = False
 
@@ -768,17 +767,6 @@ class GeminiLiveLLMService(LLMService):
 
         Returns:
             True as Gemini Live supports token usage metrics.
-        """
-        return True
-
-    def needs_mcp_alternate_schema(self) -> bool:
-        """Check if this LLM service requires alternate MCP schema.
-
-        Google/Gemini has stricter JSON schema validation and requires
-        certain properties to be removed or modified for compatibility.
-
-        Returns:
-            True for Google/Gemini services.
         """
         return True
 
@@ -964,16 +952,68 @@ class GeminiLiveLLMService(LLMService):
         if not self._context:
             # We got our initial context
             self._context = context
-            if context.tools:
-                self._tools = context.tools
+
+            # If context contains system instruction or tools, reconnect in
+            # order to apply them.
+            # (Context-provided system instruction and tools take precedence
+            # over the ones provided at initialization time. Note that we could
+            # do more sophisticated comparisons here, but for now this is
+            # sufficient: we'll assume folks won't mean to provide these
+            # settings both in the context and at initialization time. In a
+            # future change, we could/should implement the ability to swap
+            # these settings at any point).
+            adapter: GeminiLLMAdapter = self.get_llm_adapter()
+            params = adapter.get_llm_invocation_params(self._context)
+            system_instruction = params["system_instruction"]
+            tools = params["tools"]
+            if system_instruction and self._system_instruction_from_init:
+                logger.warning(
+                    "System instruction provided both at init time and in context; using context-provided value."
+                )
+            if tools and self._tools_from_init:
+                logger.warning(
+                    "Tools provided both at init time and in context; using context-provided value."
+                )
+            if system_instruction or tools:
+                await self._reconnect()
+
             # Initialize our bookkeeping of already-completed tool calls in
             # the context
             await self._process_completed_function_calls(send_new_results=False)
+
+            # Create initial response if needed, based on conversation history
+            # in context.
+            # (If the context has no messages but we do have a system
+            # instruction — meaning it was provided at init time — doctor our
+            # context now so that we'll have something to send to the service
+            # to trigger a response).
+            messages = params["messages"]
+            if not messages and self._inference_on_context_initialization:
+                if self._system_instruction_from_init:
+                    logger.debug(
+                        "No messages found in initial context; seeding with system instruction to trigger bot response."
+                    )
+                    self._context.add_message(
+                        {"role": "system", "content": self._system_instruction_from_init}
+                    )
+                else:
+                    logger.warning(
+                        "No messages found in initial context; cannot trigger initial bot response without messages or system instruction."
+                    )
             await self._create_initial_response()
         else:
             # We got an updated context.
-            # This may contain a new user message or tool call result.
             self._context = context
+
+            # Here we assume that the updated context will contain either:
+            # - new messages (that the Gemini Live service, with its own
+            #   context management, is already aware of), or
+            # - tool call results (that we need to tell the remote service
+            #   about).
+            # (In the future, we could do more sophisticated diffing here,
+            # which would enable the user to programmatically manipulate the
+            # context).
+
             # Send results for newly-completed function calls, if any.
             await self._process_completed_function_calls(send_new_results=True)
 
@@ -987,7 +1027,13 @@ class GeminiLiveLLMService(LLMService):
                     if part.function_response:
                         tool_call_id = part.function_response.id
                         tool_name = part.function_response.name
-                        if tool_call_id and tool_call_id not in self._completed_tool_calls:
+                        response = part.function_response.response
+                        if (
+                            tool_call_id
+                            and tool_call_id not in self._completed_tool_calls
+                            and response
+                            and response.get("value") != "IN_PROGRESS"
+                        ):
                             # Found a newly-completed function call - send the result to the service
                             if send_new_results:
                                 await self._tool_result(
@@ -1103,24 +1149,32 @@ class GeminiLiveLLMService(LLMService):
                         automatic_activity_detection=vad_config
                     )
 
-            # Add system instruction to configuration, if provided
-            system_instruction = self._system_instruction or ""
-            if self._context and hasattr(self._context, "extract_system_instructions"):
-                system_instruction += "\n" + self._context.extract_system_instructions()
+            # Add system instruction and tools to configuration, if provided.
+            # These settings from the context take precedence over the ones
+            # provided at initialization time.
+            adapter: GeminiLLMAdapter = self.get_llm_adapter()
+            system_instruction = None
+            tools = None
+            if self._context:
+                params = adapter.get_llm_invocation_params(self._context)
+                system_instruction = params["system_instruction"]
+                tools = params["tools"]
+            if not system_instruction:
+                system_instruction = self._system_instruction_from_init
+            if not tools:
+                tools = adapter.from_standard_tools(self._tools_from_init)
             if system_instruction:
                 logger.debug(f"Setting system instruction: {system_instruction}")
                 config.system_instruction = system_instruction
-
-            # Add tools to configuration, if provided
-            if self._tools:
-                logger.debug(f"Setting tools: {self._tools}")
-                config.tools = self.get_llm_adapter().from_standard_tools(self._tools)
+            if tools:
+                logger.debug(f"Setting tools: {tools}")
+                config.tools = tools
 
             # Start the connection
             self._connection_task = self.create_task(self._connection_task_handler(config=config))
 
         except Exception as e:
-            await self.push_error(ErrorFrame(error=f"{self} Initialization error: {e}", fatal=True))
+            await self.push_error(ErrorFrame(error=f"{self} Initialization error: {e}"))
 
     async def _connection_task_handler(self, config: LiveConnectConfig):
         async with self._client.aio.live.connect(model=self._model_name, config=config) as session:
@@ -1201,9 +1255,7 @@ class GeminiLiveLLMService(LLMService):
                 f"Max consecutive failures ({MAX_CONSECUTIVE_FAILURES}) reached, "
                 "treating as fatal error"
             )
-            await self.push_error(
-                ErrorFrame(error=f"{self} Error in receive loop: {error}", fatal=True)
-            )
+            await self.push_error(ErrorFrame(error=f"{self} Error in receive loop: {error}"))
             return False
         else:
             logger.info(
@@ -1399,7 +1451,8 @@ class GeminiLiveLLMService(LLMService):
 
             self._bot_text_buffer += text
             self._search_result_buffer += text  # Also accumulate for grounding
-            await self.push_frame(LLMTextFrame(text=text))
+            frame = LLMTextFrame(text=text)
+            await self.push_frame(frame)
 
         # Check for grounding metadata in server content
         if msg.server_content and msg.server_content.grounding_metadata:
@@ -1591,7 +1644,11 @@ class GeminiLiveLLMService(LLMService):
             await self.push_frame(TTSStartedFrame())
             await self.push_frame(LLMFullResponseStartFrame())
 
-        await self.push_frame(TTSTextFrame(text=text))
+        frame = TTSTextFrame(text=text)
+        # Gemini Live text already includes any necessary inter-chunk spaces
+        frame.includes_inter_frame_spaces = True
+
+        await self.push_frame(frame)
 
     async def _handle_msg_grounding_metadata(self, message: LiveServerMessage):
         """Handle dedicated grounding metadata messages."""
@@ -1675,13 +1732,17 @@ class GeminiLiveLLMService(LLMService):
             self._session_resumption_handle = update.new_handle
 
     async def _handle_send_error(self, error: Exception):
+        # Ignore "expected" errors that may have occurred for messages that
+        # were in-flight when a disconnection occurred.
+        if self._disconnecting or not self._session:
+            return
+
         # In server-to-server contexts, a WebSocket error should be quite rare.
         # Given how hard it is to recover from a send-side error with proper
         # state management, and that exponential backoff for retries can have
         # cost/stability implications for a service cluster, let's just treat a
         # send-side error as fatal.
-        if not self._disconnecting:
-            await self.push_error(ErrorFrame(error=f"{self} Send error: {error}", fatal=True))
+        await self.push_error(ErrorFrame(error=f"{self} Send error: {error}", fatal=True))
 
     def create_context_aggregator(
         self,
@@ -1695,7 +1756,8 @@ class GeminiLiveLLMService(LLMService):
         Constructor keyword arguments for both the user and assistant aggregators can be provided.
 
         NOTE: this method exists only for backward compatibility. New code
-        should instead do:
+        should instead do::
+
             context = LLMContext(...)
             context_aggregator = LLMContextAggregatorPair(context)
 

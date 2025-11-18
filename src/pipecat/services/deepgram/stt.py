@@ -236,7 +236,7 @@ class DeepgramSTTService(STTService):
             logger.error(f"{self}: unable to connect to Deepgram")
 
     async def _disconnect(self):
-        if self._connection.is_connected:
+        if await self._connection.is_connected():
             logger.debug("Disconnecting from Deepgram")
             # Deepgram swallows asyncio.CancelledError internally which prevents
             # proper cancellation propagation. This issue was found with
@@ -256,7 +256,7 @@ class DeepgramSTTService(STTService):
     async def _on_error(self, *args, **kwargs):
         error: ErrorResponse = kwargs["error"]
         logger.warning(f"{self} connection error, will retry: {error}")
-        await self.push_error(ErrorFrame(f"{error}"))
+        await self.push_error(ErrorFrame(error=f"{error}"))
         await self.stop_all_metrics()
         # NOTE(aleix): we don't disconnect (i.e. call finish on the connection)
         # because this triggers more errors internally in the Deepgram SDK. So,

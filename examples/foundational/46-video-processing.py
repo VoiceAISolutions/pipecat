@@ -89,7 +89,7 @@ SYSTEM_INSTRUCTION = f"""
 
 Your goal is to demonstrate your capabilities in a succinct way.
 
-Your output will be converted to audio so don't include special characters in your answers.
+Your output will be spoken aloud, so avoid special characters that can't easily be spoken, such as emojis or bullet points.
 
 Respond to what the user said in a creative and helpful way. Keep your responses brief. One or two sentences at most.
 """
@@ -111,12 +111,7 @@ async def run_bot(pipecat_transport):
     ]
 
     context = LLMContext(messages)
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        # `expect_stripped_words=False` needed when Gemini Live used with AUDIO
-        #  modality (the default)
-        assistant_params=LLMAssistantAggregatorParams(expect_stripped_words=False),
-    )
+    context_aggregator = LLMContextAggregatorPair(context)
 
     # RTVI events for Pipecat client UI
     rtvi = RTVIProcessor()
