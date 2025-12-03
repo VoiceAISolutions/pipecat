@@ -7,17 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `wait_for_all` argument to the base `LLMService`. When enabled, this
+  ensures all function calls complete before returning results to the LLM (i.e.,
+  before running a new inference with those results).
+
 ### Changed
 
-- Updated `AICFilter` to use Quail STT as the default model (`AICModelType.QUAIL_STT`). Quail STT is optimized for human-to-machine interaction (e.g., voice agents, speech-to-text) and operates at a native sample rate of 16 kHz with fixed enhancement parameters.
+- Updated `AICFilter` to use Quail STT as the default model
+  (`AICModelType.QUAIL_STT`). Quail STT is optimized for human-to-machine
+  interaction (e.g., voice agents, speech-to-text) and operates at a native
+  sample rate of 16 kHz with fixed enhancement parameters.
+
+- Updated Deepgram logging to include Deepgram request IDs for improved debugging.
 
 ### Deprecated
 
-- The `noise_gate_enable` parameter in `AICFilter` is deprecated and no longer has any effect. Noise gating is now handled automatically by the AIC VAD system. Use `AICFilter.create_vad_analyzer()` for VAD functionality instead.
+- The `noise_gate_enable` parameter in `AICFilter` is deprecated and no longer
+  has any effect. Noise gating is now handled automatically by the AIC VAD
+  system. Use `AICFilter.create_vad_analyzer()` for VAD functionality instead.
+
+- NVIDIA Services name changes (all functionality is unchanged):
+
+  - `NimLLMService` is now deprecated, use `NvidiaLLMService` instead.
+  - `RivaSTTService` is now deprecated, use `NvidiaSTTService` instead.
+  - `RivaTTSService` is now deprecated, use `NvidiaTTSService` instead.
+  - Use `uv pip install pipecat-ai[nvidia]` instead of
+    `uv pip install pipecat-ai[riva]`
+
+### Fixed
+
+- Fixed an issue in `SarvamTTSService` where the last sentence was not being
+  spoken. Now, audio is flushed when the TTS services receives the
+  `LLMFullResponseEndFrame` or `EndFrame`.
+
+- Fixed an issue in `AWSTranscribeSTTService` where the `region` arg was
+  always set to `us-east-1` when providing an AWS_REGION env var.
+
+- Fixed an issue in `DeepgramTTSService` where a `TTSStoppedFrame` was
+  incorrectly pushed after a functional call. This caused an issue with the
+  voice-ui-kit's conversational panel rending of the LLM output after a
+  function call.
 
 ## [0.0.96] - 2025-11-26 🦃 "Happy Thanksgiving!" 🦃
 
 ### Added
+
+- Added `AWSBedrockAgentCoreProcessor` to support invoking an AgentCore-hosted
+  agent in a Pipecat pipeline.
 
 - Enhanced error handling across the framework:
 
@@ -290,7 +328,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed an issue in `AWSBedrockLLMService` where the `aws_region` arg was
-  always set to `us-east-1`.
+  always set to `us-east-1` when providing an AWS_REGION env var.
 
 - Fixed an issue with `DeepgramFluxSTTService` where it sometimes failed to reconnect.
 

@@ -71,7 +71,12 @@ class DeepgramTTSService(WebsocketTTSService):
             encoding: Audio encoding format. Defaults to "linear16".
             **kwargs: Additional arguments passed to parent InterruptibleTTSService class.
         """
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        super().__init__(
+            sample_rate=sample_rate,
+            pause_frame_processing=True,
+            push_stop_frames=True,
+            **kwargs,
+        )
 
         self._api_key = api_key
         self._base_url = base_url
@@ -231,7 +236,6 @@ class DeepgramTTSService(WebsocketTTSService):
                         logger.trace(f"Received Flushed: {msg}")
                         # Flushed indicates the end of audio generation for the current buffer
                         # This happens after flush_audio() is called
-                        await self.push_frame(TTSStoppedFrame())
                     elif msg_type == "Cleared":
                         logger.trace(f"Received Cleared: {msg}")
                         # Buffer has been cleared after interruption
@@ -276,6 +280,14 @@ class DeepgramTTSService(WebsocketTTSService):
                 await self._connect()
 
             await self.start_ttfb_metrics()
+
+            response = await self._deepgram_client.speak.asyncrest.v("1").stream_raw(
+                {"text": text}, options
+            )
+
+            headers = {k: v for k, v in response.headers.items() if k.startswith("dg-")}
+            logger.debug(f'{self}: HTTP connection initialized: {{"headers": {headers}}}')
+
             await self.start_tts_usage_metrics(text)
 
             yield TTSStartedFrame()
@@ -286,7 +298,7 @@ class DeepgramTTSService(WebsocketTTSService):
             speak_msg = {"type": "Speak", "text": text}
             await self._get_websocket().send(json.dumps(speak_msg))
 
-            # The actual audio frames will be handled in _receive_messages
+            # The audio frames will be handled in _receive_messages
             yield None
 
         except Exception as e:
