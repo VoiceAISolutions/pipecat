@@ -68,6 +68,7 @@ from pipecat.processors.aggregators.openai_llm_context import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.google.frames import LLMSearchOrigin, LLMSearchResponseFrame, LLMSearchResult
+from pipecat.services.google.utils import update_google_client_http_options
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.openai.llm import (
     OpenAIAssistantContextAggregator,
@@ -562,18 +563,18 @@ class InputParams(BaseModel):
         context_window_compression: Context compression settings. Defaults to None.
         thinking: Thinking settings. Defaults to None.
             Note that these settings may require specifying a model that
-            supports them, e.g. "gemini-2.5-flash-native-audio-preview-09-2025".
+            supports them, e.g. "gemini-2.5-flash-native-audio-preview-12-2025".
         enable_affective_dialog: Enable affective dialog, which allows Gemini
             to adapt to expression and tone. Defaults to None.
             Note that these settings may require specifying a model that
-            supports them, e.g. "gemini-2.5-flash-native-audio-preview-09-2025".
+            supports them, e.g. "gemini-2.5-flash-native-audio-preview-12-2025".
             Also note that this setting may require specifying an API version that
             supports it, e.g. HttpOptions(api_version="v1alpha").
         proactivity: Proactivity settings, which allows Gemini to proactively
             decide how to behave, such as whether to avoid responding to
             content that is not relevant. Defaults to None.
             Note that these settings may require specifying a model that
-            supports them, e.g. "gemini-2.5-flash-native-audio-preview-09-2025".
+            supports them, e.g. "gemini-2.5-flash-native-audio-preview-12-2025".
             Also note that this setting may require specifying an API version that
             supports it, e.g. HttpOptions(api_version="v1alpha").
         extra: Additional parameters. Defaults to empty dict.
@@ -614,7 +615,7 @@ class GeminiLiveLLMService(LLMService):
         *,
         api_key: str,
         base_url: Optional[str] = None,
-        model="models/gemini-2.0-flash-live-001",
+        model="models/gemini-2.5-flash-native-audio-preview-12-2025",
         voice_id: str = "Charon",
         start_audio_paused: bool = False,
         start_video_paused: bool = False,
@@ -637,7 +638,7 @@ class GeminiLiveLLMService(LLMService):
                     Please use `http_options` to customize requests made by the
                     API client.
 
-            model: Model identifier to use. Defaults to "models/gemini-2.0-flash-live-001".
+            model: Model identifier to use. Defaults to "models/gemini-2.5-flash-native-audio-preview-12-2025".
             voice_id: TTS voice identifier. Defaults to "Charon".
             start_audio_paused: Whether to start with audio input paused. Defaults to False.
             start_video_paused: Whether to start with video input paused. Defaults to False.
@@ -681,7 +682,7 @@ class GeminiLiveLLMService(LLMService):
         self._video_input_paused = start_video_paused
         self._context = None
         self._api_key = api_key
-        self._http_options = http_options
+        self._http_options = update_google_client_http_options(http_options)
         self._session: AsyncSession = None
         self._connection_task = None
 

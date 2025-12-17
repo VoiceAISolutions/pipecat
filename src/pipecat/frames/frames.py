@@ -38,7 +38,7 @@ from pipecat.utils.time import nanoseconds_to_str
 from pipecat.utils.utils import obj_count, obj_id
 
 if TYPE_CHECKING:
-    from pipecat.processors.aggregators.llm_context import LLMContext, NotGiven
+    from pipecat.processors.aggregators.llm_context import LLMContext, LLMContextMessage, NotGiven
     from pipecat.processors.frame_processor import FrameProcessor
 
 
@@ -187,6 +187,20 @@ class ControlFrame(Frame):
 
 
 @dataclass
+class UninterruptibleFrame:
+    """A marker for data or control frames that must not be interrupted.
+
+    Frames with this mixin are still ordered normally, but unlike other frames,
+    they are preserved during interruptions: they remain in internal queues and
+    any task processing them will not be cancelled. This ensures the frame is
+    always delivered and processed to completion.
+
+    """
+
+    pass
+
+
+@dataclass
 class AudioRawFrame:
     """A frame containing a chunk of raw audio.
 
@@ -213,7 +227,7 @@ class ImageRawFrame:
     Parameters:
         image: Raw image bytes.
         size: Image dimensions as (width, height) tuple.
-        format: Image format (e.g., 'JPEG', 'PNG').
+        format: Image format (e.g., 'RGB', 'RGBA').
     """
 
     image: bytes
@@ -330,7 +344,7 @@ class TextFrame(DataFrame):
     """
 
     text: str
-    skip_tts: bool = field(init=False)
+    skip_tts: Optional[bool] = field(init=False)
     # Whether any necessary inter-frame (leading/trailing) spaces are already
     # included in the text.
     # NOTE: Ideally this would be available at init time with a default value,
@@ -343,7 +357,7 @@ class TextFrame(DataFrame):
 
     def __post_init__(self):
         super().__post_init__()
-        self.skip_tts = False
+        self.skip_tts = None
         self.includes_inter_frame_spaces = False
         self.append_to_context = True
 
@@ -499,6 +513,15 @@ class TranscriptionMessage:
 
 
 @dataclass
+class ThoughtTranscriptionMessage:
+    """An LLM thought message in a conversation transcript."""
+
+    role: Literal["assistant"] = field(default="assistant", init=False)
+    content: str
+    timestamp: Optional[str] = None
+
+
+@dataclass
 class TranscriptionUpdateFrame(DataFrame):
     """Frame containing new messages added to conversation transcript.
 
@@ -542,7 +565,7 @@ class TranscriptionUpdateFrame(DataFrame):
         messages: List of new transcript messages that were added.
     """
 
-    messages: List[TranscriptionMessage]
+    messages: List[TranscriptionMessage | ThoughtTranscriptionMessage]
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -561,6 +584,75 @@ class LLMContextFrame(Frame):
     """
 
     context: "LLMContext"
+
+
+@dataclass
+class LLMThoughtStartFrame(ControlFrame):
+    """Frame indicating the start of an LLM thought.
+
+    Parameters:
+        append_to_context: Whether the thought should be appended to the LLM context.
+            If it is appended, the `llm` field is required, since it will be
+            appended as an `LLMSpecificMessage`.
+        llm: Optional identifier of the LLM provider for LLM-specific handling.
+            Only required if `append_to_context` is True, as the thought is
+            appended to context as an `LLMSpecificMessage`.
+    """
+
+    append_to_context: bool = False
+    llm: Optional[str] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.append_to_context and self.llm is None:
+            raise ValueError("When append_to_context is True, llm must be set")
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return (
+            f"{self.name}(pts: {pts}, append_to_context: {self.append_to_context}, llm: {self.llm})"
+        )
+
+
+@dataclass
+class LLMThoughtTextFrame(DataFrame):
+    """Frame containing the text (or text chunk) of an LLM thought.
+
+    Note that despite this containing text, it is a DataFrame and not a
+    TextFrame, to avoid most typical text processing, such as TTS.
+
+    Parameters:
+        text: The text (or text chunk) of the thought.
+    """
+
+    text: str
+    includes_inter_frame_spaces: bool = field(init=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Assume that thought text chunks include all necessary spaces
+        self.includes_inter_frame_spaces = True
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return f"{self.name}(pts: {pts}, thought text: {self.text})"
+
+
+@dataclass
+class LLMThoughtEndFrame(ControlFrame):
+    """Frame indicating the end of an LLM thought.
+
+    Parameters:
+        signature: Optional signature associated with the thought.
+            This is used by Anthropic, which includes a signature at the end of
+            each thought.
+    """
+
+    signature: Any = None
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return f"{self.name}(pts: {pts}, signature: {self.signature})"
 
 
 @dataclass
@@ -697,6 +789,44 @@ class LLMConfigureOutputFrame(DataFrame):
 
 
 @dataclass
+class FunctionCallResultProperties:
+    """Properties for configuring function call result behavior.
+
+    Parameters:
+        run_llm: Whether to run the LLM after receiving this result.
+        on_context_updated: Callback to execute when context is updated.
+    """
+
+    run_llm: Optional[bool] = None
+    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
+@dataclass
+class FunctionCallResultFrame(DataFrame, UninterruptibleFrame):
+    """Frame containing the result of an LLM function call.
+
+    This is an uninterruptible frame because once a result is generated we
+    always want to update the context.
+
+    Parameters:
+        function_name: Name of the function that was executed.
+        tool_call_id: Unique identifier for the function call.
+        arguments: Arguments that were passed to the function.
+        result: The result returned by the function.
+        run_llm: Whether to run the LLM after this result.
+        properties: Additional properties for result handling.
+
+    """
+
+    function_name: str
+    tool_call_id: str
+    arguments: Any
+    result: Any
+    run_llm: Optional[bool] = None
+    properties: Optional[FunctionCallResultProperties] = None
+
+
+@dataclass
 class TTSSpeakFrame(DataFrame):
     """Frame containing text that should be spoken by TTS.
 
@@ -817,7 +947,7 @@ class CancelFrame(SystemFrame):
         reason: Optional reason for pushing a cancel frame.
     """
 
-    reason: Optional[str] = None
+    reason: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1090,23 +1220,6 @@ class FunctionCallsStartedFrame(SystemFrame):
 
 
 @dataclass
-class FunctionCallInProgressFrame(SystemFrame):
-    """Frame signaling that a function call is currently executing.
-
-    Parameters:
-        function_name: Name of the function being executed.
-        tool_call_id: Unique identifier for this function call.
-        arguments: Arguments passed to the function.
-        cancel_on_interruption: Whether to cancel this call if interrupted.
-    """
-
-    function_name: str
-    tool_call_id: str
-    arguments: Any
-    cancel_on_interruption: bool = False
-
-
-@dataclass
 class FunctionCallCancelFrame(SystemFrame):
     """Frame signaling that a function call has been cancelled.
 
@@ -1117,40 +1230,6 @@ class FunctionCallCancelFrame(SystemFrame):
 
     function_name: str
     tool_call_id: str
-
-
-@dataclass
-class FunctionCallResultProperties:
-    """Properties for configuring function call result behavior.
-
-    Parameters:
-        run_llm: Whether to run the LLM after receiving this result.
-        on_context_updated: Callback to execute when context is updated.
-    """
-
-    run_llm: Optional[bool] = None
-    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
-
-
-@dataclass
-class FunctionCallResultFrame(SystemFrame):
-    """Frame containing the result of an LLM function call.
-
-    Parameters:
-        function_name: Name of the function that was executed.
-        tool_call_id: Unique identifier for the function call.
-        arguments: Arguments that were passed to the function.
-        result: The result returned by the function.
-        run_llm: Whether to run the LLM after this result.
-        properties: Additional properties for result handling.
-    """
-
-    function_name: str
-    tool_call_id: str
-    arguments: Any
-    result: Any
-    run_llm: Optional[bool] = None
-    properties: Optional[FunctionCallResultProperties] = None
 
 
 @dataclass
@@ -1388,6 +1467,23 @@ class UserImageRawFrame(InputImageRawFrame):
 
 
 @dataclass
+class AssistantImageRawFrame(OutputImageRawFrame):
+    """Frame containing an image generated by the assistant.
+
+    Contains both the raw frame for display (superclass functionality) as well
+    as the original image, which can get used directly in LLM contexts.
+
+    Parameters:
+        original_data: The original image data, which can get used directly in
+            an LLM context message without further encoding.
+        original_mime_type: The MIME type of the original image data.
+    """
+
+    original_data: Optional[bytes] = None
+    original_mime_type: Optional[str] = None
+
+
+@dataclass
 class InputDTMFFrame(DTMFFrame, SystemFrame):
     """DTMF keypress input frame from transport."""
 
@@ -1454,7 +1550,7 @@ class EndTaskFrame(TaskFrame):
         reason: Optional reason for pushing an end frame.
     """
 
-    reason: Optional[str] = None
+    reason: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1472,7 +1568,7 @@ class CancelTaskFrame(TaskFrame):
         reason: Optional reason for pushing a cancel frame.
     """
 
-    reason: Optional[str] = None
+    reason: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1551,7 +1647,7 @@ class EndFrame(ControlFrame):
         reason: Optional reason for pushing an end frame.
     """
 
-    reason: Optional[str] = None
+    reason: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1632,22 +1728,42 @@ class LLMFullResponseStartFrame(ControlFrame):
     more TextFrames and a final LLMFullResponseEndFrame.
     """
 
-    skip_tts: bool = field(init=False)
+    skip_tts: Optional[bool] = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
-        self.skip_tts = False
+        self.skip_tts = None
 
 
 @dataclass
 class LLMFullResponseEndFrame(ControlFrame):
     """Frame indicating the end of an LLM response."""
 
-    skip_tts: bool = field(init=False)
+    skip_tts: Optional[bool] = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
-        self.skip_tts = False
+        self.skip_tts = None
+
+
+@dataclass
+class FunctionCallInProgressFrame(ControlFrame, UninterruptibleFrame):
+    """Frame signaling that a function call is currently executing.
+
+    This is an uninterruptible frame because we always want to update the
+    context.
+
+    Parameters:
+        function_name: Name of the function being executed.
+        tool_call_id: Unique identifier for this function call.
+        arguments: Arguments passed to the function.
+        cancel_on_interruption: Whether to cancel this call if interrupted.
+    """
+
+    function_name: str
+    tool_call_id: str
+    arguments: Any
+    cancel_on_interruption: bool = False
 
 
 @dataclass

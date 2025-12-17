@@ -30,13 +30,13 @@ EVAL_SIMPLE_MATH = EvalConfig(
 )
 
 EVAL_WEATHER = EvalConfig(
-    prompt="What's the weather in San Francisco (in farhenheit or celsius)?",
-    eval="The user says something specific about the current weather in San Francisco, including the degrees (in farhenheit or celsius).",
+    prompt="What's the weather in San Francisco? Temperature should be in fahrenheits.",
+    eval="The user talks about the weather in San Francisco, including the degrees.",
 )
 
 EVAL_ONLINE_SEARCH = EvalConfig(
-    prompt="What's the date right now in London?",
-    eval=f"The user says today is {datetime.now(timezone.utc).strftime('%B %d, %Y')} in London.",
+    prompt="What's the current date in UTC?",
+    eval=f"Current date in UTC is {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}.",
 )
 
 EVAL_SWITCH_LANGUAGE = EvalConfig(
@@ -74,6 +74,11 @@ EVAL_CONVERSATION = EvalConfig(
     eval_speaks_first=True,
 )
 
+EVAL_FLIGHT_STATUS = EvalConfig(
+    prompt="Check the status of flight AA100.",
+    eval="The user says something about the status of flight AA100, such as whether it's on time or delayed.",
+)
+
 
 TESTS_07 = [
     # 07 series
@@ -81,6 +86,7 @@ TESTS_07 = [
     ("07-interruptible-cartesia-http.py", EVAL_SIMPLE_MATH),
     ("07a-interruptible-speechmatics.py", EVAL_SIMPLE_MATH),
     ("07aa-interruptible-soniox.py", EVAL_SIMPLE_MATH),
+    ("07ab-interruptible-inworld.py", EVAL_SIMPLE_MATH),
     ("07ab-interruptible-inworld-http.py", EVAL_SIMPLE_MATH),
     ("07ac-interruptible-asyncai.py", EVAL_SIMPLE_MATH),
     ("07ac-interruptible-asyncai-http.py", EVAL_SIMPLE_MATH),
@@ -116,8 +122,6 @@ TESTS_07 = [
     # ("07i-interruptible-xtts.py", EVAL_SIMPLE_MATH),
     # Needs a Krisp license.
     # ("07p-interruptible-krisp.py", EVAL_SIMPLE_MATH),
-    # Needs GPU resources.
-    # ("07u-interruptible-ultravox.py", EVAL_SIMPLE_MATH),
 ]
 
 TESTS_12 = [
@@ -204,6 +208,13 @@ TESTS_44 = [
     ("44-voicemail-detection.py", EVAL_CONVERSATION),
 ]
 
+TESTS_49 = [
+    ("49a-thinking-anthropic.py", EVAL_SIMPLE_MATH),
+    ("49b-thinking-google.py", EVAL_SIMPLE_MATH),
+    ("49c-thinking-functions-anthropic.py", EVAL_FLIGHT_STATUS),
+    ("49d-thinking-functions-google.py", EVAL_FLIGHT_STATUS),
+]
+
 TESTS = [
     *TESTS_07,
     *TESTS_12,
@@ -216,6 +227,7 @@ TESTS = [
     *TESTS_40,
     *TESTS_43,
     *TESTS_44,
+    *TESTS_49,
 ]
 
 

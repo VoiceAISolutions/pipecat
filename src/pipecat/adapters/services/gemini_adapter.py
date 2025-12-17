@@ -151,6 +151,8 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
                     for part in obj["parts"]:
                         if "inline_data" in part:
                             part["inline_data"]["data"] = "..."
+                        if "thought_signature" in part:
+                            part["thought_signature"] = "..."
             except Exception as e:
                 logger.debug(f"Error: {e}")
             messages_for_logging.append(obj)
@@ -209,16 +211,37 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         system_instruction = None
         messages = []
         tool_call_id_to_name_mapping = {}
+        thought_signature_dicts = []
 
-        # Process each message, preserving Google-formatted messages and converting others
+        # Process each message, converting to Google format as needed
         for message in universal_context_messages:
-            result = self._from_universal_context_message(
+            # We have a Google-specific message; this may either be a
+            # thought-signature-containing message that we need to handle in a
+            # special way, or a message already in Google format that we can
+            # use directly
+            if isinstance(message, LLMSpecificMessage):
+                if (
+                    isinstance(message.message, dict)
+                    and message.message.get("type") == "thought_signature"
+                ):
+                    thought_signature_dicts.append(message.message)
+                    continue
+
+                # Fall back to assuming that the message is already in Google
+                # format
+                messages.append(message.message)
+                continue
+
+            # We have a standard universal context message; convert it to
+            # Google format
+            result = self._from_standard_message(
                 message,
                 params=self.MessageConversionParams(
                     already_have_system_instruction=bool(system_instruction),
                     tool_call_id_to_name_mapping=tool_call_id_to_name_mapping,
                 ),
             )
+
             # Each result is either a Content or a system instruction
             if result.content:
                 messages.append(result.content)
@@ -228,6 +251,9 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
             # Merge tool call ID to name mapping
             if result.tool_call_id_to_name_mapping:
                 tool_call_id_to_name_mapping.update(result.tool_call_id_to_name_mapping)
+
+        # Apply thought signatures to the corresponding messages
+        self._apply_thought_signatures_to_messages(thought_signature_dicts, messages)
 
         # Check if we only have function-related messages (no regular text)
         has_regular_messages = any(
@@ -246,13 +272,6 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         messages = [m for m in messages if m.parts]
 
         return self.ConvertedMessages(messages=messages, system_instruction=system_instruction)
-
-    def _from_universal_context_message(
-        self, message: LLMContextMessage, *, params: MessageConversionParams
-    ) -> MessageConversionResult:
-        if isinstance(message, LLMSpecificMessage):
-            return self.MessageConversionResult(content=message.message)
-        return self._from_standard_message(message, params=params)
 
     def _from_standard_message(
         self, message: LLMStandardMessage, *, params: MessageConversionParams
@@ -380,11 +399,14 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
                 if c["type"] == "text":
                     parts.append(Part(text=c["text"]))
                 elif c["type"] == "image_url" and c["image_url"]["url"].startswith("data:"):
+                    # Extract MIME type from data URL (format: "data:image/jpeg;base64,...")
+                    url = c["image_url"]["url"]
+                    mime_type = url.split(":")[1].split(";")[0]
                     parts.append(
                         Part(
                             inline_data=Blob(
-                                mime_type="image/jpeg",
-                                data=base64.b64decode(c["image_url"]["url"].split(",")[1]),
+                                mime_type=mime_type,
+                                data=base64.b64decode(url.split(",")[1]),
                             )
                         )
                     )
@@ -410,3 +432,139 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
             content=Content(role=role, parts=parts),
             tool_call_id_to_name_mapping=tool_call_id_to_name_mapping,
         )
+
+    def _apply_thought_signatures_to_messages(
+        self, thought_signature_dicts: List[dict], messages: List[Content]
+    ) -> None:
+        """Apply thought signatures to corresponding assistant messages.
+
+        See GoogleLLMService for more details about thought signatures.
+
+        Args:
+            thought_signature_dicts: A list of dicts containing:
+                - "signature": a thought signature
+                - "bookmark": a bookmark to identify the message part to apply the signature to.
+                  The bookmark may contain one of:
+                    - "function_call" (a function call ID string)
+                    - "text" (a text string)
+                    - "inline_data" (a Blob)
+                The list of thought signature dicts is in order.
+            messages: List of messages to apply the thought signatures to.
+        """
+        if not thought_signature_dicts:
+            return
+
+        # For debugging, print out thought signatures and their bookmarks
+        logger.debug(f"Thought signatures to apply: {len(thought_signature_dicts)}")
+        for ts in thought_signature_dicts:
+            bookmark = ts.get("bookmark")
+            if bookmark.get("function_call"):
+                logger.trace(f" - To function call: {bookmark['function_call']}")
+            elif bookmark.get("text"):
+                text = bookmark["text"]
+                log_display_text = f"{text[:50]}..." if len(text) > 50 else text
+                logger.trace(f" - To text: {log_display_text}")
+            elif bookmark.get("inline_data"):
+                logger.trace(f" - To inline data")
+
+        # Get all assistant messages
+        assistant_messages = [
+            message
+            for message in messages
+            if isinstance(message, Content) and message.role == "model"
+        ]
+
+        # Apply thought signatures to the corresponding assistant messages.
+        # Thought signatures are already in message order.
+        thought_signatures_applied = 0
+        message_start_index = 0  # Track where to start searching for the next matching message.
+        for thought_signature_dict in thought_signature_dicts:
+            signature = thought_signature_dict.get("signature")
+            bookmark = thought_signature_dict.get("bookmark")
+            if not signature or not bookmark:
+                continue
+
+            # Search through remaining assistant messages for a match
+            for i in range(message_start_index, len(assistant_messages)):
+                message = assistant_messages[i]
+                if not message.parts:
+                    continue
+
+                # We're assuming that the thought signature always applies to the last part
+                last_part = message.parts[-1]
+
+                # If the bookmark matches the part...
+                if self._thought_signature_bookmark_matches_part(bookmark, last_part):
+                    # Apply the thought signature
+                    last_part.thought_signature = signature
+                    thought_signatures_applied += 1
+
+                    # Update the start index and stop searching for a match
+                    message_start_index = i + 1
+                    break
+
+        # For debugging, print out how many thought signatures were applied
+        logger.debug(f"Applied {thought_signatures_applied} thought signatures.")
+
+    def _thought_signature_bookmark_matches_part(self, bookmark: dict, part: Part) -> bool:
+        if function_call_bookmark := bookmark.get("function_call"):
+            return self._thought_signature_function_call_bookmark_matches_part(
+                function_call_bookmark, part
+            )
+        elif text_bookmark := bookmark.get("text"):
+            return self._thought_signature_text_bookmark_matches_part(text_bookmark, part)
+        elif inline_data := bookmark.get("inline_data"):
+            return self._thought_signature_inline_data_bookmark_matches_part(inline_data, part)
+        else:
+            logger.warning(f"Unknown thought signature bookmark type: {bookmark}")
+
+        return False
+
+    def _thought_signature_function_call_bookmark_matches_part(
+        self, bookmark_function_call_id: str, part: Part
+    ) -> bool:
+        if (
+            hasattr(part, "function_call")
+            and part.function_call
+            and part.function_call.id == bookmark_function_call_id
+        ):
+            logger.trace(f"Thought signature function call match: {bookmark_function_call_id}")
+            return True
+
+        return False
+
+    def _thought_signature_text_bookmark_matches_part(self, bookmark_text: str, part: Part) -> bool:
+        if hasattr(part, "text") and part.text:
+            # Normalize whitespace for comparison
+            bookmark_text = " ".join(bookmark_text.split())
+            part_text = " ".join(part.text.split())
+            # Check that either:
+            # - the part text is the same as the bookmark text
+            # - a prefix of the bookmark text (in case the part text was truncated due to interruption)
+            # - the bookmark text is a prefix of the part text (in case the bookmark represents just first chunk of multi-chunk text)
+            if (
+                part_text == bookmark_text
+                or bookmark_text.startswith(part_text)
+                or part_text.startswith(bookmark_text)
+            ):
+                log_display_text = f"{part.text[:50]}..." if len(part.text) > 50 else part.text
+                logger.trace(f"Thought signature text match: {log_display_text}")
+                return True
+
+        return False
+
+    def _thought_signature_inline_data_bookmark_matches_part(
+        self, bookmark_inline_data: Blob, part: Part
+    ) -> bool:
+        if (
+            hasattr(part, "inline_data")
+            and part.inline_data
+            # Comparing length should be good enough for matching inline data,
+            # especially since we're already matching thought signatures in
+            # strict message order. Comparing actual data is expensive.
+            and len(part.inline_data.data) == len(bookmark_inline_data.data)
+        ):
+            logger.trace(f"Thought signature inline data match")
+            return True
+
+        return False

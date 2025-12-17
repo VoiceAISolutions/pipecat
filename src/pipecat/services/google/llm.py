@@ -16,7 +16,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
 from loguru import logger
 from PIL import Image
@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from pipecat.adapters.services.gemini_adapter import GeminiLLMAdapter, GeminiLLMInvocationParams
 from pipecat.frames.frames import (
+    AssistantImageRawFrame,
     AudioRawFrame,
     Frame,
     FunctionCallCancelFrame,
@@ -32,8 +33,12 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesAppendFrame,
     LLMMessagesFrame,
     LLMTextFrame,
+    LLMThoughtEndFrame,
+    LLMThoughtStartFrame,
+    LLMThoughtTextFrame,
     LLMUpdateSettingsFrame,
     OutputImageRawFrame,
     UserImageRawFrame,
@@ -50,6 +55,7 @@ from pipecat.processors.aggregators.openai_llm_context import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.google.frames import LLMSearchResponseFrame
+from pipecat.services.google.utils import update_google_client_http_options
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.openai.llm import (
     OpenAIAssistantContextAggregator,
@@ -473,11 +479,16 @@ class GoogleLLMContext(OpenAILLMContext):
                 if c["type"] == "text":
                     parts.append(Part(text=c["text"]))
                 elif c["type"] == "image_url":
+                    # Extract MIME type from data URL (format: "data:image/jpeg;base64,...")
+                    url = c["image_url"]["url"]
+                    mime_type = (
+                        url.split(":")[1].split(";")[0] if url.startswith("data:") else "image/jpeg"
+                    )
                     parts.append(
                         Part(
                             inline_data=Blob(
-                                mime_type="image/jpeg",
-                                data=base64.b64decode(c["image_url"]["url"].split(",")[1]),
+                                mime_type=mime_type,
+                                data=base64.b64decode(url.split(",")[1]),
                             )
                         )
                     )
@@ -665,6 +676,34 @@ class GoogleLLMService(LLMService):
     # Overriding the default adapter to use the Gemini one.
     adapter_class = GeminiLLMAdapter
 
+    class ThinkingConfig(BaseModel):
+        """Configuration for controlling the model's internal "thinking" process used before generating a response.
+
+        Gemini 2.5 and 3 series models have this thinking process.
+
+        Parameters:
+            thinking_level: Thinking level for Gemini 3 Pro. Can be "low" or "high".
+                If not provided, Gemini 3 Pro defaults to "high".
+                Note: Gemini 2.5 series should use thinking_budget instead.
+            thinking_budget: Token budget for thinking, for Gemini 2.5 series.
+                -1 for dynamic thinking (model decides), 0 to disable thinking,
+                or a specific token count (e.g., 128-32768 for 2.5 Pro).
+                If not provided, most models today default to dynamic thinking.
+                See https://ai.google.dev/gemini-api/docs/thinking#set-budget
+                for default values and allowed ranges.
+                Note: Gemini 3 Pro should use thinking_level instead.
+            include_thoughts: Whether to include thought summaries in the response.
+                Today's models default to not including thoughts (False).
+        """
+
+        thinking_budget: Optional[int] = Field(default=None)
+
+        # Why `| str` here? To not break compatibility in case Google adds more
+        # levels in the future.
+        thinking_level: Optional[Literal["low", "high"] | str] = Field(default=None)
+
+        include_thoughts: Optional[bool] = Field(default=None)
+
     class InputParams(BaseModel):
         """Input parameters for Google AI models.
 
@@ -673,6 +712,12 @@ class GoogleLLMService(LLMService):
             temperature: Sampling temperature between 0.0 and 2.0.
             top_k: Top-k sampling parameter.
             top_p: Top-p sampling parameter between 0.0 and 1.0.
+            thinking: Thinking configuration with thinking_budget, thinking_level, and include_thoughts.
+                Used to control the model's internal "thinking" process used before generating a response.
+                Gemini 2.5 series models use thinking_budget; Gemini 3 models use thinking_level.
+                If this is not provided, Pipecat disables thinking for all
+                models where that's possible (the 2.5 series, except 2.5 Pro),
+                to reduce latency.
             extra: Additional parameters as a dictionary.
         """
 
@@ -680,6 +725,7 @@ class GoogleLLMService(LLMService):
         temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
         top_k: Optional[int] = Field(default=None, ge=0)
         top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+        thinking: Optional["GoogleLLMService.ThinkingConfig"] = Field(default=None)
         extra: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
     def __init__(
@@ -713,13 +759,14 @@ class GoogleLLMService(LLMService):
         self.set_model_name(model)
         self._api_key = api_key
         self._system_instruction = system_instruction
-        self._http_options = http_options
+        self._http_options = update_google_client_http_options(http_options)
 
         self._settings = {
             "max_tokens": params.max_tokens,
             "temperature": params.temperature,
             "top_k": params.top_k,
             "top_p": params.top_p,
+            "thinking": params.thinking,
             "extra": params.extra if isinstance(params.extra, dict) else {},
         }
         self._tools = tools
@@ -830,6 +877,12 @@ class GoogleLLMService(LLMService):
             if v is not None
         }
 
+        # Add thinking parameters if configured
+        if self._settings["thinking"]:
+            generation_params["thinking_config"] = self._settings["thinking"].model_dump(
+                exclude_unset=True
+            )
+
         if self._settings["extra"]:
             generation_params.update(self._settings["extra"])
 
@@ -885,7 +938,7 @@ class GoogleLLMService(LLMService):
         reasoning_tokens = 0
 
         grounding_metadata = None
-        search_result = ""
+        accumulated_text = ""
 
         try:
             # Generate content using either OpenAILLMContext or universal LLMContext
@@ -918,27 +971,91 @@ class GoogleLLMService(LLMService):
                 for candidate in chunk.candidates:
                     if candidate.content and candidate.content.parts:
                         for part in candidate.content.parts:
-                            if not part.thought and part.text:
-                                search_result += part.text
-                                await self.push_frame(LLMTextFrame(part.text))
+                            function_call_id = None
+                            if part.text:
+                                if part.thought:
+                                    # Gemini emits fully-formed thoughts rather
+                                    # than chunks so bracket each thought in
+                                    # start/end
+                                    await self.push_frame(LLMThoughtStartFrame())
+                                    await self.push_frame(LLMThoughtTextFrame(part.text))
+                                    await self.push_frame(LLMThoughtEndFrame())
+                                else:
+                                    accumulated_text += part.text
+                                    await self.push_frame(LLMTextFrame(part.text))
                             elif part.function_call:
                                 function_call = part.function_call
-                                id = function_call.id or str(uuid.uuid4())
-                                logger.debug(f"Function call: {function_call.name}:{id}")
+                                function_call_id = function_call.id or str(uuid.uuid4())
+                                logger.debug(
+                                    f"Function call: {function_call.name}:{function_call_id}"
+                                )
                                 function_calls.append(
                                     FunctionCallFromLLM(
                                         context=context,
-                                        tool_call_id=id,
+                                        tool_call_id=function_call_id,
                                         function_name=function_call.name,
                                         arguments=function_call.args or {},
                                     )
                                 )
                             elif part.inline_data and part.inline_data.data:
+                                # Here we assume that inline_data is an image.
                                 image = Image.open(io.BytesIO(part.inline_data.data))
-                                frame = OutputImageRawFrame(
-                                    image=image.tobytes(), size=image.size, format="RGB"
+                                await self.push_frame(
+                                    AssistantImageRawFrame(
+                                        image=image.tobytes(),
+                                        size=image.size,
+                                        format="RGB",
+                                        original_data=part.inline_data.data,
+                                        original_mime_type=part.inline_data.mime_type,
+                                    )
                                 )
-                                await self.push_frame(frame)
+
+                            # Handle Gemini thought signatures.
+                            #
+                            # - Gemini 2.5: they appear on function_call Parts,
+                            # and then (surprisingly) on the last(*) Part of
+                            # model responses following the first function_call
+                            # in a conversation.
+                            # - Gemini 3 Pro: they appear on the last(*) Part
+                            # of model responses, regardless of Part type.
+                            #
+                            # (*) Since we're using the streaming API, though,
+                            # where text Parts may be split across multiple
+                            # chunks (each represented by a Part, confusingly),
+                            # signatures may actually appear with the first
+                            # chunk (Gemini 2.5) or in a trailing empty-text
+                            # chunk (Gemini 3 Pro).
+                            if part.thought_signature:
+                                # Save a "bookmark" for the signature, so we
+                                # can later be sure we've put it in the right
+                                # place in context when sending the context
+                                # back to the LLM to continue the conversation.
+                                bookmark = {}
+                                if part.function_call:
+                                    bookmark["function_call"] = function_call_id
+                                elif part.inline_data and part.inline_data.data:
+                                    bookmark["inline_data"] = part.inline_data
+                                elif part.text is not None:
+                                    # Account for Gemini 3 Pro trailing
+                                    # empty-text chunk by using all the text
+                                    # seen so far in this response's chunks.
+                                    bookmark["text"] = accumulated_text
+                                else:
+                                    logger.warning("Thought signature found on unhandled Part type")
+                                if bookmark:
+                                    await self.push_frame(
+                                        LLMMessagesAppendFrame(
+                                            [
+                                                self.get_llm_adapter().create_llm_specific_message(
+                                                    {
+                                                        "type": "thought_signature",
+                                                        "signature": part.thought_signature,
+                                                        "bookmark": bookmark,
+                                                    }
+                                                )
+                                            ]
+                                        )
+                                    )
 
                     if (
                         candidate.grounding_metadata
@@ -987,7 +1104,7 @@ class GoogleLLMService(LLMService):
         finally:
             if grounding_metadata and isinstance(grounding_metadata, dict):
                 llm_search_frame = LLMSearchResponseFrame(
-                    search_result=search_result,
+                    search_result=accumulated_text,
                     origins=grounding_metadata["origins"],
                     rendered_content=grounding_metadata["rendered_content"],
                 )
