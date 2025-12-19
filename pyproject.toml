@@ -54,7 +54,7 @@ aws-nova-sonic = [ "aws_sdk_bedrock_runtime~=0.2.0; python_version>='3.12'" ]
 azure = [ "azure-cognitiveservices-speech~=1.42.0"]
 cartesia = [ "cartesia~=2.0.3", "pipecat-ai[websockets-base]" ]
 cerebras = []
-daily = [ "daily-python~=0.22.0" ]
+daily = [ "daily-python~=0.23.0" ]
 deepgram = [ "deepgram-sdk~=4.7.0", "pipecat-ai[websockets-base]" ]
 deepseek = []
 elevenlabs = [ "pipecat-ai[websockets-base]" ]
@@ -87,6 +87,7 @@ neuphonic = [ "pipecat-ai[websockets-base]" ]
 noisereduce = [ "noisereduce~=3.0.3" ]
 nvidia = [ "nvidia-riva-client~=2.21.1" ]
 openai = [ "pipecat-ai[websockets-base]" ]
+rnnoise = [ "pyrnnoise~=0.2.0" ]
 openpipe = [ "openpipe>=4.50.0,<6" ]
 openrouter = []
 perplexity = []
@@ -217,6 +218,7 @@ directory = "changelog"
 start_string = "<!-- towncrier release notes start -->\n"
 template = "changelog/_template.md.j2"
 title_format = "## [{version}] - {project_date}"
+issue_format = "[#{issue}](https://github.com/pipecat-ai/pipecat/pull/{issue})"
 underlines = ["", "", ""]
 wrap = true
 
