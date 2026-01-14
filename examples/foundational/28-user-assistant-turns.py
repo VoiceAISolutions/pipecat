@@ -5,7 +5,7 @@
 #
 
 import os
-from typing import List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -13,16 +13,17 @@ from loguru import logger
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame, TranscriptionMessage, TranscriptionUpdateFrame
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
+    AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
+    UserTurnStoppedMessage,
 )
-from pipecat.processors.transcript_processor import TranscriptProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -54,22 +55,21 @@ class TranscriptHandler:
         Args:
             output_file: Path to output file. If None, outputs to log only.
         """
-        self.messages: List[TranscriptionMessage] = []
         self.output_file: Optional[str] = output_file
         logger.debug(
             f"TranscriptHandler initialized {'with output_file=' + output_file if output_file else 'with log output only'}"
         )
 
-    async def save_message(self, message: TranscriptionMessage):
+    async def save_message(self, role: str, content: str, timestamp: str):
         """Save a single transcript message.
 
         Outputs the message to the log and optionally to a file.
 
         Args:
-            message: The message to save
+            role: Who generated this transcript
+            content: The transcript to save
         """
-        timestamp = f"[{message.timestamp}] " if message.timestamp else ""
-        line = f"{timestamp}{message.role}: {message.content}"
+        line = f"[{timestamp}] {role}: {content}"
 
         # Always log the message
         logger.info(f"Transcript: {line}")
@@ -78,24 +78,27 @@ class TranscriptHandler:
         if self.output_file:
             try:
                 with open(self.output_file, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
+                    f.write(line + "\n\n")
             except Exception as e:
                 logger.error(f"Error saving transcript message to file: {e}")
 
-    async def on_transcript_update(
-        self, processor: TranscriptProcessor, frame: TranscriptionUpdateFrame
-    ):
-        """Handle new transcript messages.
+    async def on_user_transcript(self, message: UserTurnStoppedMessage):
+        """Handle new user transcript message.
 
         Args:
-            processor: The TranscriptProcessor that emitted the update
-            frame: TranscriptionUpdateFrame containing new messages
+            message: The new user message
         """
-        logger.debug(f"Received transcript update with {len(frame.messages)} new messages")
+        logger.debug(f"Received user transcript update")
+        await self.save_message("user", message.content, message.timestamp)
 
-        for msg in frame.messages:
-            self.messages.append(msg)
-            await self.save_message(msg)
+    async def on_assistant_transcript(self, message: AssistantTurnStoppedMessage):
+        """Handle new assistant transcript message.
+
+        Args:
+            message: The new assistant message
+        """
+        logger.debug(f"Received assistant transcript update")
+        await self.save_message("assistant", message.content, message.timestamp)
 
 
 # We store functions so objects (e.g. SileroVADAnalyzer) don't get
@@ -140,7 +143,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     ]
 
     context = LLMContext(messages)
-    context_aggregator = LLMContextAggregatorPair(
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=UserTurnStrategies(
@@ -150,21 +153,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     # Create transcript processor and handler
-    transcript = TranscriptProcessor()
     transcript_handler = TranscriptHandler()  # Output to log only
-    # transcript_handler = TranscriptHandler(output_file="transcript.txt") # Output to file and log
+    # transcript_handler = TranscriptHandler(output_file="transcript.txt")  # Output to file and log
 
     pipeline = Pipeline(
         [
             transport.input(),  # Transport user input
             stt,  # STT
-            transcript.user(),  # User transcripts
-            context_aggregator.user(),  # User responses
+            user_aggregator,  # User responses
             llm,  # LLM
             tts,  # TTS
             transport.output(),  # Transport bot output
-            transcript.assistant(),  # Assistant transcripts
-            context_aggregator.assistant(),  # Assistant spoken responses
+            assistant_aggregator,  # Assistant spoken responses
         ]
     )
 
@@ -183,15 +183,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         # Start conversation - empty prompt to let LLM follow system instructions
         await task.queue_frames([LLMRunFrame()])
 
-    # Register event handler for transcript updates
-    @transcript.event_handler("on_transcript_update")
-    async def on_transcript_update(processor, frame):
-        await transcript_handler.on_transcript_update(processor, frame)
-
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"Client disconnected")
         await task.cancel()
+
+    @user_aggregator.event_handler("on_user_turn_stopped")
+    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+        await transcript_handler.on_user_transcript(message)
+
+    @assistant_aggregator.event_handler("on_assistant_turn_stopped")
+    async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
+        await transcript_handler.on_assistant_transcript(message)
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     await runner.run(task)
