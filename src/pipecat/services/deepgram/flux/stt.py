@@ -27,7 +27,6 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
@@ -660,6 +659,8 @@ class DeepgramFluxSTTService(WebsocketSTTService):
         average_confidence = self._calculate_average_confidence(data)
 
         if not self._params.min_confidence or average_confidence > self._params.min_confidence:
+            # EndOfTurn means Flux has determined the turn is complete,
+            # so this TranscriptionFrame is always finalized
             await self.push_frame(
                 TranscriptionFrame(
                     transcript,
@@ -667,6 +668,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
                     time_now_iso8601(),
                     self._language,
                     result=data,
+                    finalized=True,
                 )
             )
         else:
@@ -676,8 +678,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
 
         await self._handle_transcription(transcript, True, self._language)
         await self.stop_processing_metrics()
-        await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-        await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.broadcast_frame(UserStoppedSpeakingFrame)
         await self._call_event_handler("on_end_of_turn", transcript)
 
     async def _handle_eager_end_of_turn(self, transcript: str, data: Dict[str, Any]):

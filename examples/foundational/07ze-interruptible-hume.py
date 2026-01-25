@@ -22,11 +22,10 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.inworld.tts import InworldTTSService
+from pipecat.services.hume.tts import HUME_SAMPLE_RATE, HumeTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -38,6 +37,9 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 load_dotenv(override=True)
 
 
+# We store functions so objects (e.g. SileroVADAnalyzer) don't get
+# instantiated. The function will be called when the desired transport gets
+# selected.
 transport_params = {
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
@@ -58,15 +60,14 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info("Starting bot")
+    logger.info(f"Starting bot")
 
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
-    tts = InworldTTSService(
-        api_key=os.getenv("INWORLD_API_KEY", ""),
-        voice_id="Ashley",
-        model="inworld-tts-1",
-        temperature=1.1,
+    tts = HumeTTSService(
+        api_key=os.getenv("HUME_API_KEY"),
+        # Replace with your Hume voice ID
+        voice_id="f898a92e-685f-43fa-985b-a46920f0650b",
     )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
@@ -74,7 +75,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful AI demonstrating Inworld AI's TTS. Your output will be spoken aloud, so avoid special characters that can't easily be spoken, such as emojis or bullet points. Respond to what the user said in a friendly and helpful way.",
+            "content": "You are a helpful LLM in a WebRTC call. Your goal is to demonstrate your capabilities in a succinct way. Your output will be spoken aloud, so avoid special characters that can't easily be spoken, such as emojis or bullet points. Respond to what the user said in a creative and helpful way.",
         },
     ]
 
@@ -88,18 +89,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
-
     pipeline = Pipeline(
         [
-            transport.input(),
-            rtvi,
+            transport.input(),  # Transport user input
             stt,
-            user_aggregator,
-            llm,
-            tts,
-            transport.output(),
-            assistant_aggregator,
+            user_aggregator,  # User responses
+            llm,  # LLM
+            tts,  # TTS (HumeTTSService with word timestamps)
+            transport.output(),  # Transport bot output
+            assistant_aggregator,  # Assistant spoken responses
         ]
     )
 
@@ -108,28 +106,31 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
+            audio_out_sample_rate=HUME_SAMPLE_RATE,
         ),
+        idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
         observers=[
-            RTVIObserver(rtvi),
             DebugLogObserver(
                 frame_types={
                     TTSTextFrame: (BaseOutputTransport, FrameEndpoint.SOURCE),
                 }
             ),
         ],
-        idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected")
+        logger.info(f"Client connected")
+        logger.info(
+            "💡 Word timestamps are enabled! Watch the console for TTSTextFrame logs showing each word with its PTS."
+        )
         # Kick off the conversation.
         messages.append({"role": "system", "content": "Please introduce yourself to the user."})
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info("Client disconnected")
+        logger.info(f"Client disconnected")
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)

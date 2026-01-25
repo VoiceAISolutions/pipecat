@@ -7,6 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- towncrier release notes start -->
 
+## [0.0.100] - 2026-01-20
+
+### Added
+
+- Added Hathora service to support Hathora-hosted TTS and STT models (only
+  non-streaming)
+  (PR [#3169](https://github.com/pipecat-ai/pipecat/pull/3169))
+
+- Added `CambTTSService`, using Camb.ai's TTS integration with MARS models
+  (mars-flash, mars-pro, mars-instruct) for high-quality text-to-speech
+  synthesis.
+  (PR [#3349](https://github.com/pipecat-ai/pipecat/pull/3349))
+
+- Added the `additional_headers` param to `WebsocketClientParams`, allowing
+  `WebsocketClientTransport` to send custom headers on connect, for cases such
+  as authentication.
+  (PR [#3461](https://github.com/pipecat-ai/pipecat/pull/3461))
+
+- Added `UserIdleController` for detecting user idle state, integrated into
+  `LLMUserAggregator` and `UserTurnProcessor` via optional `user_idle_timeout`
+  parameter. Emits `on_user_turn_idle` event for application-level handling.
+  Deprecated `UserIdleProcessor` in favor of the new compositional approach.
+  (PR [#3482](https://github.com/pipecat-ai/pipecat/pull/3482))
+
+- Added `on_user_mute_started` and `on_user_mute_stopped` event handlers to
+  `LLMUserAggregator` for tracking user mute state changes.
+  (PR [#3490](https://github.com/pipecat-ai/pipecat/pull/3490))
+
+### Changed
+
+- Enhanced interruption handling in `AsyncAITTSService` by supporting
+  multi-context WebSocket sessions for more robust context management.
+  (PR [#3287](https://github.com/pipecat-ai/pipecat/pull/3287))
+
+- Throttle `UserSpeakingFrame` to broadcast at most every 200ms instead of on
+  every audio chunk, reducing frame processing overhead during user speech.
+  (PR [#3483](https://github.com/pipecat-ai/pipecat/pull/3483))
+
+### Deprecated
+
+- For consistency with other package names, we just deprecated
+  `pipecat.turns.mute` (introduced in Pipecat 0.0.99) in favor of
+  `pipecat.turns.user_mute`.
+  (PR [#3479](https://github.com/pipecat-ai/pipecat/pull/3479))
+
+### Fixed
+
+- Corrected TTFB metric calculation in `AsyncAIHttpTTSService`.
+  (PR [#3287](https://github.com/pipecat-ai/pipecat/pull/3287))
+
+- Fixed an issue where the "bot-llm-text" RTVI event would not fire for
+  realtime (speech-to-speech) services:
+
+    - `AWSNovaSonicLLMService`
+    - `GeminiLiveLLMService`
+    - `OpenAIRealtimeLLMService`
+    - `GrokRealtimeLLMService`
+
+  The issue was that these services weren't pushing `LLMTextFrame`s. Now
+  they  do.
+  (PR [#3446](https://github.com/pipecat-ai/pipecat/pull/3446))
+
+- Fixed an issue where `on_user_turn_stop_timeout` could fire while a user is
+  talking when using `ExternalUserTurnStrategies`.
+  (PR [#3454](https://github.com/pipecat-ai/pipecat/pull/3454))
+
+- Fixed an issue where user turn start strategies were not being reset after a
+  user turn started, causing incorrect strategy behavior.
+  (PR [#3455](https://github.com/pipecat-ai/pipecat/pull/3455))
+
+- Fixed `MinWordsUserTurnStartStrategy` to not aggregate transcriptions,
+  preventing incorrect turn starts when words are spoken with pauses between
+  them.
+  (PR [#3462](https://github.com/pipecat-ai/pipecat/pull/3462))
+
+- Fixed an issue where Grok Realtime would error out when running with
+  SmallWebRTC transport.
+  (PR [#3480](https://github.com/pipecat-ai/pipecat/pull/3480))
+
+- Fixed a `Mem0MemoryService` issue where passing `async_mode: true` was
+  causing an error. See
+  https://docs.mem0.ai/platform/features/async-mode-default-change.
+  (PR [#3484](https://github.com/pipecat-ai/pipecat/pull/3484))
+
+- Fixed `AWSNovaSonicLLMService.reset_conversation()`, which would previously
+  error out. Now it successfully reconnects and "rehydrates" from the context
+  object.
+  (PR [#3486](https://github.com/pipecat-ai/pipecat/pull/3486))
+
+- Fixed `AzureTTSService` transcript formatting issues:
+    - Punctuation now appears without extra spaces (e.g., "Hello!" instead of
+      "Hello !")
+    - CJK languages (Chinese, Japanese, Korean) no longer have unwanted spaces
+      between characters
+  (PR [#3489](https://github.com/pipecat-ai/pipecat/pull/3489))
+
+- Fixed an issue where `UninterruptibleFrame` frames would not be preserved in
+  some cases.
+  (PR [#3494](https://github.com/pipecat-ai/pipecat/pull/3494))
+
+- Fixed memory leak in `LiveKitTransport` when `video_in_enabled` is `False`.
+  (PR [#3499](https://github.com/pipecat-ai/pipecat/pull/3499))
+
+- Fixed an issue in `AIService` where unhandled exceptions in `start()`,
+  `stop()`, or `cancel()` implementations would prevent `process_frame()` to
+  continue and therefore `StartFrame`, `EndFrame`, or `CancelFrame` from being
+  pushed downstream, causing the pipeline to not start or stop properly.
+  (PR [#3503](https://github.com/pipecat-ai/pipecat/pull/3503))
+
+- Moved `NVIDIATTSService` and `NVIDIASTTService` client initialization from
+  constructor to `start()` for better error handling.
+  (PR [#3504](https://github.com/pipecat-ai/pipecat/pull/3504))
+
+- Optimized `NVIDIATTSService` to process incoming audio frames immediately.
+  (PR [#3509](https://github.com/pipecat-ai/pipecat/pull/3509))
+
+- Optimized `NVIDIASTTService` by removing unnecessary queue and task.
+  (PR [#3509](https://github.com/pipecat-ai/pipecat/pull/3509))
+
+- Fixed a `CambTTSService` issue where client was being initialized in the
+  constructor which wouldn't allow for proper Pipeline error handling.
+  (PR [#3511](https://github.com/pipecat-ai/pipecat/pull/3511))
+
 ## [0.0.99] - 2026-01-13
 
 ### Added
@@ -24,39 +147,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A list of strategies can be specified for both strategies; strategies are
   evaluated in order until one evaluates to true.
 
-    Available user turn start strategies:
-      - VADUserTurnStartStrategy
-      - TranscriptionUserTurnStartStrategy
-      - MinWordsUserTurnStartStrategy
-      - ExternalUserTurnStartStrategy
+  Available user turn start strategies:
 
-    Available user turn stop strategies:
-      - TranscriptionUserTurnStopStrategy
-      - TurnAnalyzerUserTurnStopStrategy
-      - ExternalUserTurnStopStrategy
+  - VADUserTurnStartStrategy
+  - TranscriptionUserTurnStartStrategy
+  - MinWordsUserTurnStartStrategy
+  - ExternalUserTurnStartStrategy
 
-    The default strategies are:
+  Available user turn stop strategies:
 
-      - start: [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy]
-      - stop: [TranscriptionUserTurnStopStrategy]
+  - TranscriptionUserTurnStopStrategy
+  - TurnAnalyzerUserTurnStopStrategy
+  - ExternalUserTurnStopStrategy
 
-  urn strategies are configured when setting up `LLMContextAggregatorPair`.
+  The default strategies are:
+
+  - start: [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy]
+  - stop: [TranscriptionUserTurnStopStrategy]
+
+  Turn strategies are configured when setting up `LLMContextAggregatorPair`.
   For example:
 
-    ```python
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            user_turn_strategies=UserTurnStrategies(
-                stop=[
-                    TurnAnalyzerUserTurnStopStrategy(
-turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
-                    )
-                ],
-            )
-        ),
-    )
-    ```
+  ```python
+  context_aggregator = LLMContextAggregatorPair(
+      context,
+      user_params=LLMUserAggregatorParams(
+          user_turn_strategies=UserTurnStrategies(
+              stop=[
+                  TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
+                  )
+              ],
+          )
+      ),
+  )
+  ```
 
   In order to use the user turn strategies you must update to the new
   universal `LLMContext` and `LLMContextAggregatorPair`.
@@ -69,13 +193,13 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
 - Added `GrokRealtimeLLMService` for xAI's Grok Voice Agent API with real-time
   voice conversations:
 
-    - Support for real-time audio streaming with WebSocket connection
-    - Built-in server-side VAD (Voice Activity Detection)
-    - Multiple voice options: Ara, Rex, Sal, Eve, Leo
-    - Built-in tools support: web_search, x_search, file_search
-    - Custom function calling with standard Pipecat tools schema
-    - Configurable audio formats (PCM at 8kHz-48kHz)
-  (PR [#3267](https://github.com/pipecat-ai/pipecat/pull/3267))
+  - Support for real-time audio streaming with WebSocket connection
+  - Built-in server-side VAD (Voice Activity Detection)
+  - Multiple voice options: Ara, Rex, Sal, Eve, Leo
+  - Built-in tools support: web_search, x_search, file_search
+  - Custom function calling with standard Pipecat tools schema
+  - Configurable audio formats (PCM at 8kHz-48kHz)
+    (PR [#3267](https://github.com/pipecat-ai/pipecat/pull/3267))
 
 - Added an approximation of TTFB for Ultravox.
   (PR [#3268](https://github.com/pipecat-ai/pipecat/pull/3268))
@@ -86,11 +210,12 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   (PR [#3289](https://github.com/pipecat-ai/pipecat/pull/3289))
 
 - `LLMUserAggregator` now exposes the following events:
-     - `on_user_turn_started`: triggered when a user turn starts
-     - `on_user_turn_stopped`: triggered when a user turn ends
-     - `on_user_turn_stop_timeout`: triggered when a user turn does not stop
-        and times out
-  (PR [#3291](https://github.com/pipecat-ai/pipecat/pull/3291))
+
+  - `on_user_turn_started`: triggered when a user turn starts
+  - `on_user_turn_stopped`: triggered when a user turn ends
+  - `on_user_turn_stop_timeout`: triggered when a user turn does not stop
+    and times out
+    (PR [#3291](https://github.com/pipecat-ai/pipecat/pull/3291))
 
 - Introducing user mute strategies. User mute strategies indicate when user
   input should be muted based on the current system state.
@@ -104,12 +229,12 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   frame is muted if any of the configured strategies indicates it should be
   muted.
 
-    Available user mute strategies:
+  Available user mute strategies:
 
-    * `FirstSpeechUserMuteStrategy`
-    * `MuteUntilFirstBotCompleteUserMuteStrategy`
-    * `AlwaysUserMuteStrategy`
-    * `FunctionCallUserMuteStrategy`
+  - `FirstSpeechUserMuteStrategy`
+  - `MuteUntilFirstBotCompleteUserMuteStrategy`
+  - `AlwaysUserMuteStrategy`
+  - `FunctionCallUserMuteStrategy`
 
   User mute strategies replace the legacy `STTMuteFilter` and provide a more
   flexible and composable approach to muting user input.
@@ -117,16 +242,16 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   User mute strategies are configured when setting up the
   `LLMContextAggregatorPair`. For example:
 
-    ```python
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            user_mute_strategies=[
-                FirstSpeechUserMuteStrategy(),
-            ]
-        ),
-    )
-    ```
+  ```python
+  context_aggregator = LLMContextAggregatorPair(
+      context,
+      user_params=LLMUserAggregatorParams(
+          user_mute_strategies=[
+              FirstSpeechUserMuteStrategy(),
+          ]
+      ),
+  )
+  ```
 
   In order to use user mute strategies you should update to the new universal
   `LLMContext` and `LLMContextAggregatorPair`.
@@ -159,16 +284,17 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   (PR [#3357](https://github.com/pipecat-ai/pipecat/pull/3357))
 
 - Added image support to `OpenAIRealtimeLLMService` via `InputImageRawFrame`:
-    - New `start_video_paused` parameter to control initial video input state
-    - New `video_frame_detail` parameter to set image processing quality
-  ("auto",
-      "low", or "high"). This corresponds to OpenAI Realtime's `image_detail`
-      parameter.
-    - `set_video_input_paused()` method to pause/resume video input at runtime
-    - `set_video_frame_detail()` method to adjust video frame quality
-       dynamically
-    - Automatic rate limiting (1 frame per second) to prevent API overload
-  (PR [#3360](https://github.com/pipecat-ai/pipecat/pull/3360))
+
+  - New `start_video_paused` parameter to control initial video input state
+  - New `video_frame_detail` parameter to set image processing quality
+    ("auto",
+    "low", or "high"). This corresponds to OpenAI Realtime's `image_detail`
+    parameter.
+  - `set_video_input_paused()` method to pause/resume video input at runtime
+  - `set_video_frame_detail()` method to adjust video frame quality
+    dynamically
+  - Automatic rate limiting (1 frame per second) to prevent API overload
+    (PR [#3360](https://github.com/pipecat-ai/pipecat/pull/3360))
 
 - Added `UserTurnProcessor`, a frame processor built on `UserTurnController`
   that pushes `UserStartedSpeakingFrame` and `UserStoppedSpeakingFrame` frames
@@ -188,11 +314,12 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   (PR [#3374](https://github.com/pipecat-ai/pipecat/pull/3374))
 
 - `LLMAssistantAggregator` now exposes the following events:
-     - `on_assistant_turn_started`: triggered when the assistant turn starts
-     - `on_assistant_turn_stopped`: triggered when the assistant turn ends
-     - `on_assistant_thought`: triggered when there's an assistant thought
-  available
-  (PR [#3385](https://github.com/pipecat-ai/pipecat/pull/3385))
+
+  - `on_assistant_turn_started`: triggered when the assistant turn starts
+  - `on_assistant_turn_stopped`: triggered when the assistant turn ends
+  - `on_assistant_thought`: triggered when there's an assistant thought
+    available
+    (PR [#3385](https://github.com/pipecat-ai/pipecat/pull/3385))
 
 - Added `KrispVivaTurn` analyzer for end of turn detection using the Krisp VIVA
   SDK (requires `krisp_audio`).
@@ -202,13 +329,14 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   register custom pipeline task setup files by setting the
   `PIPECAT_SETUP_FILES` environment variable. This variable should contain a
   colon-separated list of Python files (e.g. `export
-  PIPECAT_SETUP_FILES="setup1.py:setup.py:..."`). Each file must define a
+PIPECAT_SETUP_FILES="setup1.py:setup.py:..."`). Each file must define a
   function with the following signature:
 
-    ```python
-    async def setup_pipeline_task(task: PipelineTask):
-        ...
-    ```
+  ```python
+  async def setup_pipeline_task(task: PipelineTask):
+      ...
+  ```
+
   (PR [#3397](https://github.com/pipecat-ai/pipecat/pull/3397))
 
 - Added a keepalive task for `InworldTTSService` to keep the service connected
@@ -238,12 +366,14 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
 
 - Updated `ElevenLabsRealtimeSTTService` to accept the
   `include_language_detection` parameter to detect language.
-    ```python
-      stt = ElevenLabsRealtimeSTTService(
-          api_key=os.getenv("ELEVENLABS_API_KEY"),
-          include_language_detection=True
-      )
-    ```
+
+  ```python
+    stt = ElevenLabsRealtimeSTTService(
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        include_language_detection=True
+    )
+  ```
+
   (PR [#3216](https://github.com/pipecat-ai/pipecat/pull/3216))
 
 - Updated `SpeechmaticsSTTService` to use new Python Voice SDK with improved
@@ -251,16 +381,18 @@ turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams())
   without any impact on accuracy. Use the `turn_detection_mode` parameter to control
   the endpointing of speech, with `TurnDetectionMode.EXTERNAL` (default),
   `TurnDetectionMode.ADAPTIVE`, or `TurnDetectionMode.SMART_TURN`.
-    ```python
+
+  ```python
       stt = SpeechmaticsSTTService(
           api_key=os.getenv("SPEECHMATICS_API_KEY"),
           params=SpeechmaticsSTTService.InputParams(
               language=Language.EN,
-turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
+              turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
               speaker_active_format="<{speaker_id}>{text}</{speaker_id}>",
           ),
       )
-    ```
+  ```
+
   (PR [#3225](https://github.com/pipecat-ai/pipecat/pull/3225))
 
 - `daily-python` updated to 0.23.0.
@@ -273,10 +405,15 @@ turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
 
 - Updates to Inworld TTS services:
 
-    - Improved `InworldTTSService`'s websocket implementation to better flush
-      and close context to better handle long inputs.
-    - Improved docstrings for `InworldTTSService` and `InworldHttpTTSService`.
-  (PR [#3288](https://github.com/pipecat-ai/pipecat/pull/3288))
+  - Improved `InworldTTSService`'s websocket implementation to better flush
+    and close context to better handle long inputs.
+  - Improved docstrings for `InworldTTSService` and `InworldHttpTTSService`.
+    (PR [#3288](https://github.com/pipecat-ai/pipecat/pull/3288))
+
+- Improved the error handling and reconnection logic for `WebsocketServer` by
+  distinguishing between errors when disconnecting and websocket communication
+  errors.
+  (PR [#3392](https://github.com/pipecat-ai/pipecat/pull/3392))
 
 - Updated `DeepgramSTTService` to push user started/stopped speaking and
   interruption frames when `vad_enabled` is set to true. This centralizes the
@@ -308,7 +445,8 @@ turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
 - Smart Turn now takes into account `vad_start_seconds` when buffering audio,
   meaning that the start of the turn audio is not cut off. This improves
   accuracy for short utterances.
-    - The default value of `pre_speech_ms` is now set to 500ms for Smart Turn.
+
+- The default value of `pre_speech_ms` is now set to 500ms for Smart Turn.
   (PR [#3377](https://github.com/pipecat-ai/pipecat/pull/3377))
 
 - Improved Krisp SDK management to allow `KrispVivaTurn` and `KrispVivaFilter`
@@ -376,17 +514,18 @@ turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
   From the developer's point of view, switching to using `LLMContext`
   machinery will usually be a matter of going from this:
 
-    ```python
-    context = OpenAILLMContext(messages, tools)
-    context_aggregator = llm.create_context_aggregator(context)
-    ```
+  ```python
+  context = OpenAILLMContext(messages, tools)
+  context_aggregator = llm.create_context_aggregator(context)
+  ```
 
-    To this:
+  To this:
 
-    ```
-    context = LLMContext(messages, tools)
-    context_aggregator = LLMContextAggregatorPair(context)
-    ```
+  ```
+  context = LLMContext(messages, tools)
+  context_aggregator = LLMContextAggregatorPair(context)
+  ```
+
   (PR [#3263](https://github.com/pipecat-ai/pipecat/pull/3263))
 
 - `STTMuteFilter` is deprecated and will be removed in a future version. Use
@@ -401,16 +540,17 @@ turn_detection_mode=SpeechmaticsSTTService.TurnDetectionMode.ADAPTIVE,
   `LLMUserAggregator`'s new parameter `user_turn_strategies` instead. For
   example, to disable interruptions but still get user turns you can do:
 
-    ```python
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            user_turn_strategies=UserTurnStrategies(
-start=[TranscriptionUserTurnStartStrategy(enable_interruptions=False)],
-            ),
-        ),
-    )
-    ```
+  ```python
+  context_aggregator = LLMContextAggregatorPair(
+      context,
+      user_params=LLMUserAggregatorParams(
+          user_turn_strategies=UserTurnStrategies(
+              start=[TranscriptionUserTurnStartStrategy(enable_interruptions=False)],
+          ),
+      ),
+  )
+  ```
+
   (PR [#3297](https://github.com/pipecat-ai/pipecat/pull/3297))
 
 - `TranscriptProcessor` and related data classes and frames
@@ -433,7 +573,9 @@ start=[TranscriptionUserTurnStartStrategy(enable_interruptions=False)],
 ### Fixed
 
 - Improved error handling in `ElevenLabsRealtimeSTTService`
-  - Fixed an issue in `ElevenLabsRealtimeSTTService` causing an infinite loop
+  (PR [#3233](https://github.com/pipecat-ai/pipecat/pull/3233))
+
+- Fixed an issue in `ElevenLabsRealtimeSTTService` causing an infinite loop
   that blocks the process if the websocket disconnects due to an error
   (PR [#3233](https://github.com/pipecat-ai/pipecat/pull/3233))
 
@@ -446,13 +588,14 @@ start=[TranscriptionUserTurnStartStrategy(enable_interruptions=False)],
   (PR [#3322](https://github.com/pipecat-ai/pipecat/pull/3322))
 
 - Updated `SpeechmaticsSTTService` for version `0.0.99+`:
-    - Fixed `SpeechmaticsSTTService` to listen for `VADUserStoppedSpeakingFrame`
-      in order to finalize transcription.
-    - Default to `TurnDetectionMode.FIXED` for Pipecat-controlled end of turn
-      detection.
-    - Only emit VAD + interruption frames if VAD is enabled within the plugin
-      (modes other than `TurnDetectionMode.FIXED` or `TurnDetectionMode.EXTERNAL`).
-  (PR [#3328](https://github.com/pipecat-ai/pipecat/pull/3328))
+
+  - Fixed `SpeechmaticsSTTService` to listen for `VADUserStoppedSpeakingFrame`
+    in order to finalize transcription.
+  - Default to `TurnDetectionMode.FIXED` for Pipecat-controlled end of turn
+    detection.
+  - Only emit VAD + interruption frames if VAD is enabled within the plugin
+    (modes other than `TurnDetectionMode.FIXED` or `TurnDetectionMode.EXTERNAL`).
+    (PR [#3328](https://github.com/pipecat-ai/pipecat/pull/3328))
 
 - Fixed an issue with function calling where a handler failing to invoke its
   result callback could leave the context stuck in IN_PROGRESS, causing LLM
@@ -480,6 +623,9 @@ start=[TranscriptionUserTurnStartStrategy(enable_interruptions=False)],
   set after awaiting, allowing the event loop to re-enter the method before the
   guard was set.
   (PR [#3400](https://github.com/pipecat-ai/pipecat/pull/3400))
+
+- Fixed parallel function calling when using Gemini thinking.
+  (PR [3420](https://github.com/pipecat-ai/pipecat/pull/3420))
 
 - Fixed an issue in `traced_llm` where `model_name` in OpenTelemetry appears as
   `unknown`.
