@@ -228,10 +228,14 @@ async def parse_telephony_websocket(websocket: WebSocket):
                 "custom_parameters": start_data.get("custom_parameters", ""),
             }
         elif transport_type == "audiofork":
-            call_data = {
+            start_data = {
                 "call_uuid": call_data_raw.get("call_uuid"),
-                "stream_id": call_data_raw.get("stream_id"),
+                "stream_id": call_data_raw.get("stream_id", ""),
+                "to": call_data_raw.get("to", ""),
+                "from": call_data_raw.get("from", "")
             }
+
+            call_data = start_data
 
         else:
             call_data = {}
