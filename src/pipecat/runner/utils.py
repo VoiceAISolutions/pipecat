@@ -89,6 +89,11 @@ def _detect_transport_type_from_message(message_data: dict) -> str:
         logger.trace("Auto-detected: EXOTEL")
         return "exotel"
 
+    # AudioFork detection
+    if "call_uuid" in message_data:
+        logger.trace("Auto-detected: AUDIOFORK")
+        return "audiofork"
+
     logger.trace("Auto-detection failed - unknown format")
     return "unknown"
 
@@ -231,6 +236,15 @@ async def parse_telephony_websocket(websocket: WebSocket):
                 "to": start_data.get("to", ""),
                 "custom_parameters": start_data.get("custom_parameters", ""),
             }
+        elif transport_type == "audiofork":
+            start_data = {
+                "call_uuid": call_data_raw.get("call_uuid"),
+                "stream_id": call_data_raw.get("stream_id", ""),
+                "to": call_data_raw.get("to", ""),
+                "from": call_data_raw.get("from", ""),
+            }
+
+            call_data = start_data
 
         else:
             call_data = {}
