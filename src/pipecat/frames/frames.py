@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -30,7 +30,7 @@ from typing import (
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.dtmf.types import KeypadEntry as NewKeypadEntry
 from pipecat.audio.interruptions.base_interruption_strategy import BaseInterruptionStrategy
-from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.base_turn_analyzer import BaseTurnParams
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.metrics.metrics import MetricsData
 from pipecat.transcriptions.language import Language
@@ -38,7 +38,7 @@ from pipecat.utils.time import nanoseconds_to_str
 from pipecat.utils.utils import obj_count, obj_id
 
 if TYPE_CHECKING:
-    from pipecat.processors.aggregators.llm_context import LLMContext, LLMContextMessage, NotGiven
+    from pipecat.processors.aggregators.llm_context import LLMContext, NotGiven
     from pipecat.processors.frame_processor import FrameProcessor
 
 
@@ -426,12 +426,15 @@ class TranscriptionFrame(TextFrame):
         timestamp: When the transcription occurred.
         language: Detected or specified language of the speech.
         result: Raw result from the STT service.
+        finalized: Whether this is the final transcription for an utterance.
+            Set by STT services that support commit/finalize signals.
     """
 
     user_id: str
     timestamp: str
     language: Optional[Language] = None
     result: Optional[Any] = None
+    finalized: bool = False
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
@@ -513,9 +516,15 @@ class OpenAILLMContextAssistantTimestampFrame(DataFrame):
             )
 
 
-# A more universal (LLM-agnostic) name for
-# OpenAILLMContextAssistantTimestampFrame, matching LLMContext
-LLMContextAssistantTimestampFrame = OpenAILLMContextAssistantTimestampFrame
+@dataclass
+class LLMContextAssistantTimestampFrame(DataFrame):
+    """Timestamp information for assistant messages in LLM context.
+
+    Parameters:
+        timestamp: Timestamp when the assistant message was created.
+    """
+
+    timestamp: str
 
 
 @dataclass
@@ -530,6 +539,10 @@ class TranscriptionMessage:
         content: The message content/text.
         user_id: Optional identifier for the user.
         timestamp: Optional timestamp when the message was created.
+
+    .. deprecated:: 0.0.99
+        `TranscriptionMessage` is deprecated and will be removed in a future version.
+        Use `LLMUserAggregator`'s and `LLMAssistantAggregator`'s new events instead.
     """
 
     role: Literal["user", "assistant"]
@@ -537,14 +550,43 @@ class TranscriptionMessage:
     user_id: Optional[str] = None
     timestamp: Optional[str] = None
 
+    def __post_init__(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "TranscriptionMessage is deprecated and will be removed in a future version. "
+                "Use `LLMUserAggregator`'s and `LLMAssistantAggregator`'s new events instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
 
 @dataclass
 class ThoughtTranscriptionMessage:
-    """An LLM thought message in a conversation transcript."""
+    """An LLM thought message in a conversation transcript.
+
+    .. deprecated:: 0.0.99
+        `ThoughtTranscriptionMessage` is deprecated and will be removed in a future version.
+        Use `LLMAssistantAggregator`'s new events instead.
+    """
 
     role: Literal["assistant"] = field(default="assistant", init=False)
     content: str
     timestamp: Optional[str] = None
+
+    def __post_init__(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "ThoughtTranscriptionMessage is deprecated and will be removed in a future version. "
+                "Use `LLMAssistantAggregator`'s new events instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
 
 @dataclass
@@ -589,9 +631,27 @@ class TranscriptionUpdateFrame(DataFrame):
 
     Parameters:
         messages: List of new transcript messages that were added.
+
+    .. deprecated:: 0.0.99
+        `TranscriptionUpdateFrame` is deprecated and will be removed in a future version.
+        Use `LLMUserAggregator`'s and `LLMAssistantAggregator`'s new events instead.
     """
 
     messages: List[TranscriptionMessage | ThoughtTranscriptionMessage]
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "TranscriptionUpdateFrame is deprecated and will be removed in a future version. "
+                "Use `LLMUserAggregator`'s and `LLMAssistantAggregator`'s new events instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -945,10 +1005,18 @@ class StartFrame(SystemFrame):
         audio_in_sample_rate: Input audio sample rate in Hz.
         audio_out_sample_rate: Output audio sample rate in Hz.
         allow_interruptions: Whether to allow user interruptions.
+
+            .. deprecated:: 0.0.99
+                Use  `LLMUserAggregator`'s new `user_mute_strategies` parameter instead.
+
         enable_metrics: Whether to enable performance metrics collection.
         enable_tracing: Whether to enable OpenTelemetry tracing.
         enable_usage_metrics: Whether to enable usage metrics collection.
         interruption_strategies: List of interruption handling strategies.
+
+            .. deprecated:: 0.0.99
+                Use  `LLMUserAggregator`'s new `user_turn_strategies` parameter instead.
+
         report_only_initial_ttfb: Whether to report only initial time-to-first-byte.
     """
 
@@ -1091,15 +1159,17 @@ class StartInterruptionFrame(InterruptionFrame):
 
 @dataclass
 class UserStartedSpeakingFrame(SystemFrame):
-    """Frame indicating user has started speaking.
+    """Frame indicating that the user turn has started.
 
-    Emitted by VAD to indicate that a user has started speaking. This can be
-    used for interruptions or other times when detecting that someone is
-    speaking is more important than knowing what they're saying (as you will
-    get with a TranscriptionFrame).
+    Emitted when the user turn starts, which usually means that some
+    transcriptions are already available.
 
     Parameters:
         emulated: Whether this event was emulated rather than detected by VAD.
+
+            .. deprecated:: 0.0.99
+                This field is deprecated and will be removed in a future version.
+
     """
 
     emulated: bool = False
@@ -1107,12 +1177,17 @@ class UserStartedSpeakingFrame(SystemFrame):
 
 @dataclass
 class UserStoppedSpeakingFrame(SystemFrame):
-    """Frame indicating user has stopped speaking.
+    """Frame indicating that the user turn has ended.
 
-    Emitted by the VAD to indicate that a user stopped speaking.
+    Emitted when the user turn ends. This usually coincides with the start of
+    the bot turn.
 
     Parameters:
         emulated: Whether this event was emulated rather than detected by VAD.
+
+            .. deprecated:: 0.0.99
+                This field is deprecated and will be removed in a future version.
+
     """
 
     emulated: bool = False
@@ -1134,9 +1209,23 @@ class EmulateUserStartedSpeakingFrame(SystemFrame):
 
     Emitted by internal processors upstream to emulate VAD behavior when a
     user starts speaking.
+
+    .. deprecated:: 0.0.99
+        This frame is deprecated and will be removed in a future version.
     """
 
-    pass
+    def __post_init__(self):
+        super().__post_init__()
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "EmulateUserStartedSpeakingFrame is deprecated and will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
 
 @dataclass
@@ -1145,9 +1234,23 @@ class EmulateUserStoppedSpeakingFrame(SystemFrame):
 
     Emitted by internal processors upstream to emulate VAD behavior when a
     user stops speaking.
+
+    .. deprecated:: 0.0.99
+        This frame is deprecated and will be removed in a future version.
     """
 
-    pass
+    def __post_init__(self):
+        super().__post_init__()
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "EmulateUserStoppedSpeakingFrame is deprecated and will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
 
 @dataclass
@@ -1361,29 +1464,29 @@ class UserImageRequestFrame(SystemFrame):
         text: An optional text associated to the image request.
         append_to_context: Whether the requested image should be appended to the LLM context.
         video_source: Specific video source to capture from.
+        function_name: Name of function that generated this request (if any).
+        tool_call_id: Tool call ID if generated by function call (if any).
         context: [DEPRECATED] Optional context for the image request.
-        function_name: [DEPRECATED] Name of function that generated this request (if any).
-        tool_call_id: [DEPRECATED] Tool call ID if generated by function call.
     """
 
     user_id: str
     text: Optional[str] = None
     append_to_context: Optional[bool] = None
     video_source: Optional[str] = None
-    context: Optional[Any] = None
     function_name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    context: Optional[Any] = None
 
     def __post_init__(self):
         super().__post_init__()
 
-        if self.context or self.function_name or self.tool_call_id:
+        if self.context:
             import warnings
 
             with warnings.catch_warnings():
                 warnings.simplefilter("always")
                 warnings.warn(
-                    "`UserImageRequestFrame` fields `context`, `function_name` and `tool_call_id` are deprecated.",
+                    "`UserImageRequestFrame` field `context` is deprecated.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
@@ -1465,27 +1568,13 @@ class UserImageRawFrame(InputImageRawFrame):
         user_id: Identifier of the user who provided this image.
         text: An optional text associated to this image.
         append_to_context: Whether the requested image should be appended to the LLM context.
-        request: [DEPRECATED] The original image request frame if this is a response.
+        request: The original image request frame if this is a response.
     """
 
     user_id: str = ""
     text: Optional[str] = None
     append_to_context: Optional[bool] = None
     request: Optional[UserImageRequestFrame] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-
-        if self.request:
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "`UserImageRawFrame` field `request` is deprecated.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -1542,7 +1631,7 @@ class SpeechControlParamsFrame(SystemFrame):
     """
 
     vad_params: Optional[VADParams] = None
-    turn_params: Optional[SmartTurnParams] = None
+    turn_params: Optional[BaseTurnParams] = None
 
 
 #

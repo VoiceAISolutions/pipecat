@@ -1,4 +1,4 @@
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 
@@ -16,7 +16,6 @@ from pipecat import version as pipecat_version
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
-    ErrorFrame,
     Frame,
     InterruptionFrame,
     StartFrame,

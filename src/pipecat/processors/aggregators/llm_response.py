@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -67,6 +67,10 @@ from pipecat.utils.time import time_now_iso8601
 class LLMUserAggregatorParams:
     """Parameters for configuring LLM user aggregation behavior.
 
+    .. deprecated:: 0.0.99
+        This class is deprecated, use the new universal `LLMContext` and
+        `LLMContextAggregatorPair`.
+
     Parameters:
         aggregation_timeout: Maximum time in seconds to wait for additional
             transcription content before pushing aggregated result. This
@@ -87,6 +91,10 @@ class LLMUserAggregatorParams:
 @dataclass
 class LLMAssistantAggregatorParams:
     """Parameters for configuring LLM assistant aggregation behavior.
+
+    .. deprecated:: 0.0.99
+        This class is deprecated, use the new universal `LLMContext` and
+        `LLMContextAggregatorPair`.
 
     Parameters:
         expect_stripped_words: Whether to expect and handle stripped words
@@ -1016,10 +1024,8 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         logger.debug(
             f"{self} FunctionCallCancelFrame: [{frame.function_name}:{frame.tool_call_id}]"
         )
-        if frame.tool_call_id not in self._function_calls_in_progress:
-            return
-
-        if self._function_calls_in_progress[frame.tool_call_id].cancel_on_interruption:
+        function_call = self._function_calls_in_progress.get(frame.tool_call_id)
+        if function_call and function_call.cancel_on_interruption:
             await self.handle_function_call_cancel(frame)
             del self._function_calls_in_progress[frame.tool_call_id]
 

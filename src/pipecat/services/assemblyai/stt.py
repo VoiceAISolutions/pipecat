@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -25,8 +25,8 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.stt_service import WebsocketSTTService
@@ -160,9 +160,9 @@ class AssemblyAISTTService(WebsocketSTTService):
             direction: Direction of frame processing.
         """
         await super().process_frame(frame, direction)
-        if isinstance(frame, UserStartedSpeakingFrame):
-            await self.start_ttfb_metrics()
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            pass
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
             if (
                 self._vad_force_turn_endpoint
                 and self._websocket
@@ -198,6 +198,8 @@ class AssemblyAISTTService(WebsocketSTTService):
 
         Establishes websocket connection and starts receive task.
         """
+        await super()._connect()
+
         await self._connect_websocket()
 
         if self._websocket and not self._receive_task:
@@ -208,6 +210,8 @@ class AssemblyAISTTService(WebsocketSTTService):
 
         Sends termination message, waits for acknowledgment, and cleans up.
         """
+        await super()._disconnect()
+
         if not self._connected or not self._websocket:
             return
 
@@ -350,7 +354,6 @@ class AssemblyAISTTService(WebsocketSTTService):
         """Handle transcription results."""
         if not message.transcript:
             return
-        await self.stop_ttfb_metrics()
         if message.end_of_turn and (
             not self._connection_params.formatted_finals or message.turn_is_formatted
         ):

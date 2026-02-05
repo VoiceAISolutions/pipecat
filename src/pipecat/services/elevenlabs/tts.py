@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -478,6 +478,8 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 await self.add_word_timestamps([("Reset", 0)])
 
     async def _connect(self):
+        await super()._connect()
+
         await self._connect_websocket()
 
         if self._websocket and not self._receive_task:
@@ -487,6 +489,8 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def _disconnect(self):
+        await super()._disconnect()
+
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
@@ -709,11 +713,10 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                     self._partial_word = ""
                     self._partial_word_start_time = 0.0
                     # If a context ID does not exist, create a new one and
-                    # register it. If an ID exists, that means the Pipeline is
-                    # configured for allow_interruptions=False, so continue
-                    # using the current ID. When interruptions are enabled
-                    # (e.g. allow_interruptions=True), user speech results in
-                    # an interruption, which resets the context ID.
+                    # register it. If an ID exists, that means the Pipeline
+                    # doesn't allow user interruptions, so continue using the
+                    # current ID. When interruptions are allowed, user speech
+                    # results in an interruption, which resets the context ID.
                     if not self._context_id:
                         self._context_id = str(uuid.uuid4())
                     if not self.audio_context_available(self._context_id):

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -29,8 +29,8 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.stt_service import SegmentedSTTService, WebsocketSTTService
@@ -310,7 +310,6 @@ class ElevenLabsSTTService(SegmentedSTTService):
         self, transcript: str, is_final: bool, language: Optional[str] = None
     ):
         """Handle a transcription result with tracing."""
-        await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
@@ -328,7 +327,6 @@ class ElevenLabsSTTService(SegmentedSTTService):
         """
         try:
             await self.start_processing_metrics()
-            await self.start_ttfb_metrics()
 
             # Upload audio and get transcription result directly
             result = await self._transcribe_audio(audio)
@@ -417,6 +415,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
                 Only used when commit_strategy is VAD. None uses ElevenLabs default.
             include_timestamps: Whether to include word-level timestamps in transcripts.
             enable_logging: Whether to enable logging on ElevenLabs' side.
+            include_language_detection: Whether to include language detection in transcripts.
         """
 
         language_code: Optional[str] = None
@@ -427,6 +426,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         min_silence_duration_ms: Optional[int] = None
         include_timestamps: bool = False
         enable_logging: bool = False
+        include_language_detection: bool = False
 
     def __init__(
         self,
@@ -537,9 +537,8 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def start_metrics(self):
+    async def _start_metrics(self):
         """Start performance metrics collection for transcription processing."""
-        await self.start_ttfb_metrics()
         await self.start_processing_metrics()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -551,14 +550,18 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            # Reset finalize state for new utterance
+            self.set_finalize_pending(False)
             # Start metrics when user starts speaking
-            await self.start_metrics()
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+            await self._start_metrics()
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
             # Send commit when user stops speaking (manual commit mode)
             if self._params.commit_strategy == CommitStrategy.MANUAL:
                 if self._websocket and self._websocket.state is State.OPEN:
                     try:
+                        # Mark that the next committed transcript should be finalized
+                        self.set_finalize_pending(True)
                         commit_message = {
                             "message_type": "input_audio_chunk",
                             "audio_base_64": "",
@@ -603,6 +606,8 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
 
     async def _connect(self):
         """Establish WebSocket connection to ElevenLabs Realtime STT."""
+        await super()._connect()
+
         await self._connect_websocket()
 
         if self._websocket and not self._receive_task:
@@ -610,6 +615,8 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
 
     async def _disconnect(self):
         """Close WebSocket connection and cleanup tasks."""
+        await super()._disconnect()
+
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
@@ -639,6 +646,11 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
 
             if self._params.enable_logging:
                 params.append(f"enable_logging={str(self._params.enable_logging).lower()}")
+
+            if self._params.include_language_detection:
+                params.append(
+                    f"include_language_detection={str(self._params.include_language_detection).lower()}"
+                )
 
             # Add VAD parameters if using VAD commit strategy and values are specified
             if self._params.commit_strategy == CommitStrategy.VAD:
@@ -753,8 +765,6 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         if not text:
             return
 
-        await self.stop_ttfb_metrics()
-
         # Get language if provided
         language = data.get("language_code")
 
@@ -792,7 +802,6 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         if not text:
             return
 
-        await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
 
         # Get language if provided
@@ -834,7 +843,6 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         if not text:
             return
 
-        await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
 
         # Get language if provided
