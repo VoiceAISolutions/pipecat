@@ -122,7 +122,7 @@ class AudioForkSerializer(FrameSerializer):
             return json.dumps({"type": "text", "data": frame.text})
         elif isinstance(frame, (EndFrame, CancelFrame)):
             # If the frame has a reason indicating transfer, e.g. "transfer:1003"
-            if frame.reason and frame.reason[:8] == 'transfer':
+            if frame.reason and frame.reason[:8] == "transfer":
                 return json.dumps({"type": "transfer", "data": frame.reason[9:]})
             return json.dumps({"type": "disconnect"})
 

@@ -241,7 +241,7 @@ async def parse_telephony_websocket(websocket: WebSocket):
                 "call_uuid": call_data_raw.get("call_uuid"),
                 "stream_id": call_data_raw.get("stream_id", ""),
                 "to": call_data_raw.get("to", ""),
-                "from": call_data_raw.get("from", "")
+                "from": call_data_raw.get("from", ""),
             }
 
             call_data = start_data
