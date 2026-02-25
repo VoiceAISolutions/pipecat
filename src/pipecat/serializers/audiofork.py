@@ -33,7 +33,7 @@ from pipecat.frames.frames import (
     StartFrame,
     TextFrame,
 )
-from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
+from pipecat.serializers.base_serializer import FrameSerializer
 
 
 class AudioForkSerializer(FrameSerializer):
@@ -73,14 +73,7 @@ class AudioForkSerializer(FrameSerializer):
         self._input_resampler = create_stream_resampler()
         self._output_resampler = create_stream_resampler()
 
-    @property
-    def type(self) -> FrameSerializerType:
-        """Get the serializer type.
 
-        Returns:
-            Mixed type as we handle both text and binary frames.
-        """
-        return FrameSerializerType.BINARY
 
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
@@ -123,7 +116,7 @@ class AudioForkSerializer(FrameSerializer):
         elif isinstance(frame, (EndFrame, CancelFrame)):
             # If the frame has a reason indicating transfer, e.g. "transfer:1003"
             if frame.reason and frame.reason[:8] == "transfer":
-                return json.dumps({"type": "transfer", "data": frame.reason[9:]})
+                return json.dumps({"type": "transfer", "data": int(frame.reason[9:])})
             return json.dumps({"type": "disconnect"})
 
         # logger.warning(f"Frame type {type(frame)} is not serializable")

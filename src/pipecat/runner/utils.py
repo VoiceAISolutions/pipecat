@@ -161,7 +161,7 @@ async def parse_telephony_websocket(websocket: WebSocket):
     try:
         # First message - required
         first_message_raw = await message_stream.__anext__()
-        logger.trace(f"First message: {first_message_raw}")
+        logger.debug(f"First message: {first_message_raw}")
         first_message = json.loads(first_message_raw) if first_message_raw else {}
     except json.JSONDecodeError:
         pass
@@ -171,7 +171,7 @@ async def parse_telephony_websocket(websocket: WebSocket):
     try:
         # Second message - optional, some providers may only send one
         second_message_raw = await message_stream.__anext__()
-        logger.trace(f"Second message: {second_message_raw}")
+        logger.debug(f"Second message: {second_message_raw}")
         second_message = json.loads(second_message_raw) if second_message_raw else {}
     except json.JSONDecodeError:
         pass
