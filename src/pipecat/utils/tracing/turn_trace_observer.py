@@ -11,7 +11,9 @@ turn, integrating with the turn tracking system to provide hierarchical tracing
 of conversation flows.
 """
 
-from typing import TYPE_CHECKING, Dict, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
@@ -19,9 +21,8 @@ from pipecat.frames.frames import StartFrame
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.utils.tracing.conversation_context_provider import ConversationContextProvider
 from pipecat.utils.tracing.setup import is_tracing_available
-from pipecat.utils.tracing.turn_context_provider import TurnContextProvider
+from pipecat.utils.tracing.tracing_context import TracingContext
 
 # Import types for type checking only
 if TYPE_CHECKING:
@@ -47,8 +48,9 @@ class TurnTraceObserver(BaseObserver):
         self,
         turn_tracker: TurnTrackingObserver,
         latency_tracker: UserBotLatencyObserver,
-        conversation_id: Optional[str] = None,
-        additional_span_attributes: Optional[dict] = None,
+        conversation_id: str | None = None,
+        additional_span_attributes: dict | None = None,
+        tracing_context: TracingContext | None = None,
         **kwargs,
     ):
         """Initialize the turn trace observer.
@@ -58,18 +60,20 @@ class TurnTraceObserver(BaseObserver):
             latency_tracker: The latency tracking observer for user-bot latency.
             conversation_id: Optional conversation ID for grouping turns.
             additional_span_attributes: Additional attributes to add to spans.
+            tracing_context: Pipeline-scoped tracing context for span hierarchy.
             **kwargs: Additional arguments passed to parent class.
         """
         super().__init__(**kwargs)
         self._turn_tracker = turn_tracker
         self._latency_tracker = latency_tracker
-        self._current_span: Optional["Span"] = None
+        self._tracing_context = tracing_context or TracingContext()
+        self._current_span: Span | None = None
         self._current_turn_number: int = 0
-        self._trace_context_map: Dict[int, "SpanContext"] = {}
+        self._trace_context_map: dict[int, SpanContext] = {}
         self._tracer = trace.get_tracer("pipecat.turn") if is_tracing_available() else None
 
         # Conversation tracking properties
-        self._conversation_span: Optional["Span"] = None
+        self._conversation_span: Span | None = None
         self._conversation_id = conversation_id
         self._additional_span_attributes = additional_span_attributes or {}
 
@@ -113,7 +117,7 @@ class TurnTraceObserver(BaseObserver):
         if isinstance(data.frame, StartFrame) and not self._conversation_span:
             self.start_conversation_tracing(self._conversation_id)
 
-    def start_conversation_tracing(self, conversation_id: Optional[str] = None):
+    def start_conversation_tracing(self, conversation_id: str | None = None):
         """Start a new conversation span.
 
         Args:
@@ -123,9 +127,8 @@ class TurnTraceObserver(BaseObserver):
             return
 
         # Generate a conversation ID if not provided
-        context_provider = ConversationContextProvider.get_instance()
         if conversation_id is None:
-            conversation_id = context_provider.generate_conversation_id()
+            conversation_id = TracingContext.generate_conversation_id()
             logger.debug(f"Generated new conversation ID: {conversation_id}")
 
         self._conversation_id = conversation_id
@@ -140,8 +143,8 @@ class TurnTraceObserver(BaseObserver):
         for k, v in (self._additional_span_attributes or {}).items():
             self._conversation_span.set_attribute(k, v)
 
-        # Update the conversation context provider
-        context_provider.set_current_conversation_context(
+        # Update the tracing context
+        self._tracing_context.set_conversation_context(
             self._conversation_span.get_span_context(), conversation_id
         )
 
@@ -161,9 +164,8 @@ class TurnTraceObserver(BaseObserver):
             self._current_span.end()
             self._current_span = None
 
-            # Clear the turn context provider
-            context_provider = TurnContextProvider.get_instance()
-            context_provider.set_current_turn_context(None)
+            # Clear the turn context
+            self._tracing_context.set_turn_context(None)
 
         # Now end the conversation span if it exists
         if self._conversation_span:
@@ -171,9 +173,8 @@ class TurnTraceObserver(BaseObserver):
             self._conversation_span.end()
             self._conversation_span = None
 
-            # Clear the context provider
-            context_provider = ConversationContextProvider.get_instance()
-            context_provider.set_current_conversation_context(None)
+            # Clear the conversation context
+            self._tracing_context.set_conversation_context(None)
 
             logger.debug(f"Ended tracing for Conversation {self._conversation_id}")
             self._conversation_id = None
@@ -189,8 +190,7 @@ class TurnTraceObserver(BaseObserver):
         # Get the parent context - conversation if available, otherwise use root context
         parent_context = None
         if self._conversation_span:
-            context_provider = ConversationContextProvider.get_instance()
-            parent_context = context_provider.get_current_conversation_context()
+            parent_context = self._tracing_context.get_conversation_context()
 
         # Create a new span for this turn
         self._current_span = self._tracer.start_span("turn", context=parent_context)
@@ -207,9 +207,8 @@ class TurnTraceObserver(BaseObserver):
         # Store the span context so services can become children of this span
         self._trace_context_map[turn_number] = self._current_span.get_span_context()
 
-        # Update the context provider so services can access this span
-        context_provider = TurnContextProvider.get_instance()
-        context_provider.set_current_turn_context(self._current_span.get_span_context())
+        # Update the tracing context so services can access this span
+        self._tracing_context.set_turn_context(self._current_span.get_span_context())
 
         logger.debug(f"Started tracing for Turn {turn_number}")
 
@@ -228,13 +227,12 @@ class TurnTraceObserver(BaseObserver):
             self._current_span.end()
             self._current_span = None
 
-            # Clear the context provider
-            context_provider = TurnContextProvider.get_instance()
-            context_provider.set_current_turn_context(None)
+            # Clear the turn context
+            self._tracing_context.set_turn_context(None)
 
             logger.debug(f"Ended tracing for Turn {turn_number}")
 
-    def get_current_turn_context(self) -> Optional["SpanContext"]:
+    def get_current_turn_context(self) -> SpanContext | None:
         """Get the span context for the current turn.
 
         This can be used by services to create child spans.
@@ -247,7 +245,7 @@ class TurnTraceObserver(BaseObserver):
 
         return self._current_span.get_span_context()
 
-    def get_turn_context(self, turn_number: int) -> Optional["SpanContext"]:
+    def get_turn_context(self, turn_number: int) -> SpanContext | None:
         """Get the span context for a specific turn.
 
         This can be used by services to create child spans.

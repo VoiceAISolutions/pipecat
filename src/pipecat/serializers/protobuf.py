@@ -8,7 +8,6 @@
 
 import dataclasses
 import json
-from typing import Optional
 
 from loguru import logger
 
@@ -61,13 +60,18 @@ class ProtobufFrameSerializer(FrameSerializer):
     }
     DESERIALIZABLE_FIELDS = {v: k for k, v in DESERIALIZABLE_TYPES.items()}
 
-    def __init__(self, params: Optional[FrameSerializer.InputParams] = None):
+    def __init__(self, params: FrameSerializer.InputParams | None = None):
         """Initialize the Protobuf frame serializer.
 
         Args:
             params: Configuration parameters.
         """
         super().__init__(params)
+        # The base serializer defaults to filtering out RTVI protocol messages
+        # to avoid sending them over telephony media streams. ProtobufFrameSerializer
+        # is used by WebSocket transports, which are the delivery channel for
+        # these messages, so we disable the filter.
+        self._params.ignore_rtvi_messages = False
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         """Serialize a frame to Protocol Buffer binary format.

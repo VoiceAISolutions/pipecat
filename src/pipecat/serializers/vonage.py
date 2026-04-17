@@ -7,10 +7,8 @@
 """Vonage Audio Connector WebSocket serializer for Pipecat."""
 
 import json
-from typing import Optional
 
 from loguru import logger
-from pydantic import BaseModel
 
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.utils import create_stream_resampler
@@ -48,9 +46,9 @@ class VonageFrameSerializer(FrameSerializer):
         """
 
         vonage_sample_rate: int = 16000
-        sample_rate: Optional[int] = None
+        sample_rate: int | None = None
 
-    def __init__(self, params: Optional[InputParams] = None):
+    def __init__(self, params: InputParams | None = None):
         """Initialize the VonageFrameSerializer.
 
         Args:

@@ -7,8 +7,8 @@
 """Turn start strategy configuration."""
 
 from dataclasses import dataclass
-from typing import List, Optional
 
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.turns.user_start import (
     BaseUserTurnStartStrategy,
     ExternalUserTurnStartStrategy,
@@ -18,8 +18,33 @@ from pipecat.turns.user_start import (
 from pipecat.turns.user_stop import (
     BaseUserTurnStopStrategy,
     ExternalUserTurnStopStrategy,
-    TranscriptionUserTurnStopStrategy,
+    TurnAnalyzerUserTurnStopStrategy,
 )
+
+
+def default_user_turn_start_strategies() -> list[BaseUserTurnStartStrategy]:
+    """Return the default user turn start strategies.
+
+    Returns ``[VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy]``.
+    Useful when building a custom strategy list that extends the defaults.
+
+    Example::
+
+        start_strategies = [
+            WakePhraseUserTurnStartStrategy(phrases=["hey pipecat"]),
+            *default_user_turn_start_strategies(),
+        ]
+    """
+    return [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
+
+
+def default_user_turn_stop_strategies() -> list[BaseUserTurnStopStrategy]:
+    """Return the default user turn stop strategies.
+
+    Returns ``[TurnAnalyzerUserTurnStopStrategy(LocalSmartTurnAnalyzerV3)]``.
+    Useful when building a custom strategy list that extends the defaults.
+    """
+    return [TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]
 
 
 @dataclass
@@ -29,9 +54,9 @@ class UserTurnStrategies:
     If no strategies are specified, the following defaults are used:
 
         start: [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy]
-         stop: [TranscriptionUserTurnStopStrategy]
+         stop: [TurnAnalyzerUserTurnStopStrategy(LocalSmartTurnAnalyzerV3)]
 
-    Attributes:
+    Parameters:
         start: A list of user turn start strategies used to detect when
             the user starts speaking.
         stop: A list of user turn stop strategies used to decide when
@@ -39,14 +64,14 @@ class UserTurnStrategies:
 
     """
 
-    start: Optional[List[BaseUserTurnStartStrategy]] = None
-    stop: Optional[List[BaseUserTurnStopStrategy]] = None
+    start: list[BaseUserTurnStartStrategy] | None = None
+    stop: list[BaseUserTurnStopStrategy] | None = None
 
     def __post_init__(self):
         if not self.start:
-            self.start = [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
+            self.start = default_user_turn_start_strategies()
         if not self.stop:
-            self.stop = [TranscriptionUserTurnStopStrategy()]
+            self.stop = default_user_turn_stop_strategies()
 
 
 @dataclass

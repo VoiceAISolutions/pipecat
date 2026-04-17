@@ -15,13 +15,13 @@ import asyncio
 import time
 from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 from loguru import logger
 
 from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, BaseTurnParams, EndOfTurnState
-from pipecat.metrics.metrics import MetricsData, SmartTurnMetricsData
+from pipecat.metrics.metrics import MetricsData, TurnMetricsData
 
 # Default timing parameters
 STOP_SECS = 3
@@ -57,9 +57,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
     implement the specific model prediction logic.
     """
 
-    def __init__(
-        self, *, sample_rate: Optional[int] = None, params: Optional[SmartTurnParams] = None
-    ):
+    def __init__(self, *, sample_rate: int | None = None, params: SmartTurnParams | None = None):
         """Initialize the smart turn analyzer.
 
         Args:
@@ -146,7 +144,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
 
         return state
 
-    async def analyze_end_of_turn(self) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
+    async def analyze_end_of_turn(self) -> tuple[EndOfTurnState, MetricsData | None]:
         """Analyze the current audio state to determine if turn has ended.
 
         Returns:
@@ -178,7 +176,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         self._speech_start_time = 0
         self._silence_ms = 0
 
-    def _process_speech_segment(self, audio_buffer) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
+    def _process_speech_segment(self, audio_buffer) -> tuple[EndOfTurnState, MetricsData | None]:
         """Process accumulated audio segment using ML model."""
         state = EndOfTurnState.INCOMPLETE
 
@@ -222,18 +220,11 @@ class BaseSmartTurn(BaseTurnAnalyzer):
                 # Calculate processing time
                 e2e_processing_time_ms = (end_time - start_time) * 1000
 
-                # Extract metrics from the nested structure
-                metrics = result.get("metrics", {})
-                inference_time = metrics.get("inference_time", 0)
-                total_time = metrics.get("total_time", 0)
-
                 # Prepare the result data
-                result_data = SmartTurnMetricsData(
+                result_data = TurnMetricsData(
                     processor="BaseSmartTurn",
                     is_complete=result["prediction"] == 1,
                     probability=result["probability"],
-                    inference_time_ms=inference_time * 1000,
-                    server_total_time_ms=total_time * 1000,
                     e2e_processing_time_ms=e2e_processing_time_ms,
                 )
 
@@ -241,8 +232,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
                     f"Prediction: {'Complete' if result_data.is_complete else 'Incomplete'}"
                 )
                 logger.trace(f"Probability of complete: {result_data.probability:.4f}")
-                logger.trace(f"Inference time: {result_data.inference_time_ms:.2f}ms")
-                logger.trace(f"Server total time: {result_data.server_total_time_ms:.2f}ms")
                 logger.trace(f"E2E processing time: {result_data.e2e_processing_time_ms:.2f}ms")
             except SmartTurnTimeoutException:
                 logger.debug(
@@ -257,6 +246,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         return state, result_data
 
     @abstractmethod
-    def _predict_endpoint(self, audio_array: np.ndarray) -> Dict[str, Any]:
+    def _predict_endpoint(self, audio_array: np.ndarray) -> dict[str, Any]:
         """Predict end-of-turn using ML model from audio data."""
         pass

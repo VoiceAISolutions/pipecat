@@ -15,7 +15,7 @@ passed directly to the constructor.
 """
 
 import os
-from typing import Optional, Tuple
+import time
 
 import numpy as np
 from loguru import logger
@@ -26,7 +26,7 @@ from pipecat.audio.krisp_instance import (
     int_to_krisp_sample_rate,
 )
 from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, BaseTurnParams, EndOfTurnState
-from pipecat.metrics.metrics import MetricsData
+from pipecat.metrics.metrics import MetricsData, TurnMetricsData
 
 try:
     import krisp_audio
@@ -60,9 +60,10 @@ class KrispVivaTurn(BaseTurnAnalyzer):
     def __init__(
         self,
         *,
-        model_path: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        params: Optional[KrispTurnParams] = None,
+        model_path: str | None = None,
+        sample_rate: int | None = None,
+        params: KrispTurnParams | None = None,
+        api_key: str = "",
     ) -> None:
         """Initialize the Krisp turn analyzer.
 
@@ -72,6 +73,8 @@ class KrispVivaTurn(BaseTurnAnalyzer):
             sample_rate: Optional initial sample rate for audio processing.
                 If provided, this will be used as the fixed sample rate.
             params: Configuration parameters for turn analysis behavior.
+            api_key: Krisp SDK API key. If empty, falls back to
+                the KRISP_VIVA_API_KEY environment variable.
 
         Raises:
             ValueError: If model_path is not provided and KRISP_VIVA_TURN_MODEL_PATH is not set.
@@ -83,7 +86,7 @@ class KrispVivaTurn(BaseTurnAnalyzer):
 
         # Acquire SDK reference (will initialize on first call)
         try:
-            KrispVivaSDKManager.acquire()
+            KrispVivaSDKManager.acquire(api_key=api_key)
             self._sdk_acquired = True
         except Exception as e:
             self._sdk_acquired = False
@@ -115,6 +118,9 @@ class KrispVivaTurn(BaseTurnAnalyzer):
             self._last_probability = None
             self._frame_probabilities = []
             self._last_state = EndOfTurnState.INCOMPLETE
+            self._speech_stopped_time: float | None = None
+            self._e2e_processing_time_ms: float | None = None
+            self._last_metrics: TurnMetricsData | None = None
 
             # Create session with provided sample rate or default to 16000 Hz
             # This preloads the model to improve latency when set_sample_rate is called later
@@ -207,7 +213,7 @@ class KrispVivaTurn(BaseTurnAnalyzer):
         return self._frame_probabilities
 
     @property
-    def last_probability(self) -> Optional[float]:
+    def last_probability(self) -> float | None:
         """Get the last turn probability value computed.
 
         Returns:
@@ -288,7 +294,14 @@ class KrispVivaTurn(BaseTurnAnalyzer):
                     # Track speech start time
                     if not self._speech_triggered:
                         logger.trace("Speech detected, turn analysis started")
+                        self._e2e_processing_time_ms = None
                     self._speech_triggered = True
+                    # Reset speech stopped time when speech resumes
+                    self._speech_stopped_time = None
+                else:
+                    # Record the moment speech transitions to non-speech
+                    if self._speech_triggered and self._speech_stopped_time is None:
+                        self._speech_stopped_time = time.perf_counter()
                 # Note: We don't immediately mark as complete on silence detection.
                 # Instead, we wait for the model's probability check below to confirm
                 # end-of-turn based on the threshold.
@@ -308,6 +321,18 @@ class KrispVivaTurn(BaseTurnAnalyzer):
                 # Only mark as complete if we've detected speech and the model
                 # confirms with sufficient confidence
                 if self._speech_triggered and prob >= self._params.threshold:
+                    # Calculate e2e processing time: time from speech stop to threshold crossing
+                    if self._speech_stopped_time is not None:
+                        self._e2e_processing_time_ms = (
+                            time.perf_counter() - self._speech_stopped_time
+                        ) * 1000
+                        self._last_metrics = TurnMetricsData(
+                            processor="KrispVivaTurn",
+                            is_complete=True,
+                            probability=prob,
+                            e2e_processing_time_ms=self._e2e_processing_time_ms,
+                        )
+                        logger.debug(f"Krisp turn complete")
                     state = EndOfTurnState.COMPLETE
                     self.clear()
                     break
@@ -322,19 +347,22 @@ class KrispVivaTurn(BaseTurnAnalyzer):
             self._last_state = error_state
             return error_state
 
-    async def analyze_end_of_turn(self) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
+    async def analyze_end_of_turn(self) -> tuple[EndOfTurnState, MetricsData | None]:
         """Analyze the current audio state to determine if turn has ended.
 
         Returns:
             Tuple containing the end-of-turn state and optional metrics data.
             Returns the last state determined by append_audio().
         """
-        # For real-time processing, the state is determined in append_audio
-        # Return the last state that was computed
-        return self._last_state, None
+        # For real-time processing, the state is determined in append_audio.
+        # Consume metrics so they aren't pushed twice.
+        metrics = self._last_metrics
+        self._last_metrics = None
+        return self._last_state, metrics
 
     def clear(self):
         """Reset the turn analyzer to its initial state."""
         self._speech_triggered = False
         self._audio_buffer.clear()
         self._last_state = EndOfTurnState.INCOMPLETE
+        self._speech_stopped_time = None
