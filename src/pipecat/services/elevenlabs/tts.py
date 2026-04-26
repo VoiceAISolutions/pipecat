@@ -39,7 +39,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import (
     TextAggregationMode,
     TTSService,
@@ -243,6 +243,35 @@ class ElevenLabsHttpTTSSettings(TTSSettings):
     apply_text_normalization: Literal["auto", "on", "off"] | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
+
+
+def _strip_leading_space(
+    alignment: Mapping[str, Any], keys: tuple[str, str, str]
+) -> Mapping[str, Any]:
+    """Return alignment with a prepended space char removed, if present.
+
+    Normalized alignment chunks from ElevenLabs begin with a leading space that
+    marks the prosody/chunk boundary. Left in place, it would prematurely
+    terminate a partial word carried over from the previous chunk. Stripping it
+    is lossless for timing: the dropped space's duration is still reflected in
+    the next char's `charStartTimesMs`, and the chunk's last-element values
+    (used to advance cumulative time) are untouched.
+
+    Args:
+        alignment: Alignment dict from the API.
+        keys: Tuple of (chars_key, start_times_key, durations_or_end_times_key)
+            naming the three parallel arrays — these differ between the
+            WebSocket and HTTP response schemas.
+    """
+    chars_key, starts_key, tail_key = keys
+    chars = alignment.get(chars_key) or []
+    if chars and chars[0] == " ":
+        return {
+            chars_key: chars[1:],
+            starts_key: alignment.get(starts_key, [])[1:],
+            tail_key: alignment.get(tail_key, [])[1:],
+        }
+    return alignment
 
 
 def calculate_word_times(
@@ -790,8 +819,15 @@ class ElevenLabsTTSService(WebsocketTTSService):
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1, context_id=received_ctx_id)
                 await self.append_to_audio_context(received_ctx_id, frame)
 
-            if msg.get("alignment"):
-                alignment = msg["alignment"]
+            if msg.get("normalizedAlignment"):
+                # Use normalizedAlignment (what was actually spoken) rather than
+                # alignment (the input text), so word timestamps stay accurate
+                # when a pronunciation dictionary or text normalization rewrites
+                # the input.
+                alignment = _strip_leading_space(
+                    msg["normalizedAlignment"],
+                    ("chars", "charStartTimesMs", "charDurationsMs"),
+                )
                 word_times, self._partial_word, self._partial_word_start_time = (
                     calculate_word_times(
                         alignment,
@@ -853,7 +889,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
             await self._websocket.send(json.dumps(msg))
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using ElevenLabs' streaming WebSocket API.
 
         Args:
@@ -1204,7 +1240,7 @@ class ElevenLabsHttpTTSService(TTSService):
         return word_times
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using ElevenLabs streaming API with timestamps.
 
         Makes a request to the ElevenLabs API to generate audio and timing data.
@@ -1223,9 +1259,10 @@ class ElevenLabsHttpTTSService(TTSService):
         # Use the with-timestamps endpoint
         url = f"{self._base_url}/v1/text-to-speech/{self._settings.voice}/stream/with-timestamps"
 
+        model_id = assert_given(self._settings.model)
         payload: dict[str, str | dict[str, float | bool]] = {
             "text": text,
-            "model_id": self._settings.model,
+            "model_id": model_id,
         }
 
         # Include previous text as context if available
@@ -1240,11 +1277,12 @@ class ElevenLabsHttpTTSService(TTSService):
                 locator.model_dump() for locator in self._pronunciation_dictionary_locators
             ]
 
-        if self._settings.apply_text_normalization is not None:
-            payload["apply_text_normalization"] = self._settings.apply_text_normalization
+        apply_text_normalization = assert_given(self._settings.apply_text_normalization)
+        if apply_text_normalization is not None:
+            payload["apply_text_normalization"] = apply_text_normalization
 
-        language = self._settings.language
-        if self._settings.model in ELEVENLABS_MULTILINGUAL_MODELS and language:
+        language = assert_given(self._settings.language)
+        if model_id in ELEVENLABS_MULTILINGUAL_MODELS and language:
             payload["language_code"] = language
             logger.debug(f"Using language code: {language}")
         elif language:
@@ -1261,8 +1299,9 @@ class ElevenLabsHttpTTSService(TTSService):
         params = {
             "output_format": self._output_format,
         }
-        if self._settings.optimize_streaming_latency is not None:
-            params["optimize_streaming_latency"] = self._settings.optimize_streaming_latency
+        optimize_streaming_latency = assert_given(self._settings.optimize_streaming_latency)
+        if optimize_streaming_latency is not None:
+            params["optimize_streaming_latency"] = str(optimize_streaming_latency)
         if self._enable_logging is not None:
             params["enable_logging"] = str(self._enable_logging).lower()
 
@@ -1296,21 +1335,30 @@ class ElevenLabsHttpTTSService(TTSService):
                                 audio, self.sample_rate, 1, context_id=context_id
                             )
 
-                        # Process alignment if present
-                        if data and "alignment" in data:
-                            alignment = data["alignment"]
-                            if alignment:  # Ensure alignment is not None
-                                # Get end time of the last character in this chunk
-                                char_end_times = alignment.get("character_end_times_seconds", [])
-                                if char_end_times:
-                                    chunk_end_time = char_end_times[-1]
-                                    # Update to the longest end time seen so far
-                                    utterance_duration = max(utterance_duration, chunk_end_time)
+                        # Process alignment if present. Use normalized_alignment
+                        # (what was actually spoken) so word timestamps stay
+                        # accurate when a pronunciation dictionary or text
+                        # normalization rewrites the input.
+                        if data and data.get("normalized_alignment"):
+                            alignment = _strip_leading_space(
+                                data["normalized_alignment"],
+                                (
+                                    "characters",
+                                    "character_start_times_seconds",
+                                    "character_end_times_seconds",
+                                ),
+                            )
+                            # Get end time of the last character in this chunk
+                            char_end_times = alignment.get("character_end_times_seconds", [])
+                            if char_end_times:
+                                chunk_end_time = char_end_times[-1]
+                                # Update to the longest end time seen so far
+                                utterance_duration = max(utterance_duration, chunk_end_time)
 
-                                # Calculate word timestamps
-                                word_times = self.calculate_word_times(alignment)
-                                if word_times:
-                                    await self.add_word_timestamps(word_times, context_id)
+                            # Calculate word timestamps
+                            word_times = self.calculate_word_times(alignment)
+                            if word_times:
+                                await self.add_word_timestamps(word_times, context_id)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse JSON from stream: {e}")
                         continue

@@ -27,7 +27,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import STTSettings
+from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import MISTRAL_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.utils.time import time_now_iso8601
@@ -185,7 +185,7 @@ class MistralSTTService(STTService):
             if self._connection and not self._connection.is_closed:
                 await self._connection.flush_audio()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Mistral for transcription.
 
         Args:
@@ -214,8 +214,11 @@ class MistralSTTService(STTService):
                 sample_rate=self.sample_rate,
             )
 
+            model = assert_given(self._settings.model)
+            if model is None:
+                raise ValueError("Mistral STT model must be specified")
             self._connection = await self._client.audio.realtime.connect(
-                model=self._settings.model,
+                model=model,
                 audio_format=audio_format,
                 target_streaming_delay_ms=self._target_streaming_delay_ms,
             )
