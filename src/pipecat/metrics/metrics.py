@@ -11,9 +11,9 @@ collected throughout the pipeline, including timing, token usage, and
 processing statistics.
 """
 
-from typing import Optional
-
 from pydantic import BaseModel
+
+from pipecat.utils.deprecation import deprecated
 
 
 class MetricsData(BaseModel):
@@ -25,7 +25,7 @@ class MetricsData(BaseModel):
     """
 
     processor: str
-    model: Optional[str] = None
+    model: str | None = None
 
 
 class TTFBMetricsData(MetricsData):
@@ -62,9 +62,9 @@ class LLMTokenUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    cache_read_input_tokens: Optional[int] = None
-    cache_creation_input_tokens: Optional[int] = None
-    reasoning_tokens: Optional[int] = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 class LLMUsageMetricsData(MetricsData):
@@ -87,6 +87,19 @@ class TTSUsageMetricsData(MetricsData):
     value: int
 
 
+class TextAggregationMetricsData(MetricsData):
+    """Text aggregation time metrics data.
+
+    Measures the time from the first LLM token to the first complete sentence,
+    representing the latency cost of sentence aggregation in the TTS pipeline.
+
+    Parameters:
+        value: Aggregation time in seconds.
+    """
+
+    value: float
+
+
 class TurnMetricsData(MetricsData):
     """Metrics data for turn detection predictions.
 
@@ -102,11 +115,15 @@ class TurnMetricsData(MetricsData):
     e2e_processing_time_ms: float
 
 
+@deprecated(
+    "`SmartTurnMetricsData` is deprecated since 0.0.104 and will be removed in 2.0.0. "
+    "Use `TurnMetricsData` instead."
+)
 class SmartTurnMetricsData(TurnMetricsData):
     """Metrics data for smart turn predictions.
 
     .. deprecated:: 0.0.104
-        Use :class:`TurnMetricsData` instead. This class will be removed in a future version.
+        Use :class:`TurnMetricsData` instead. Will be removed in 2.0.0.
 
     Parameters:
         inference_time_ms: Time taken for inference in milliseconds.

@@ -16,14 +16,14 @@ Classes:
 """
 
 import asyncio
+import warnings
 from pathlib import Path
 from threading import Lock
-from typing import List, Optional, Tuple
 
 import numpy as np
 from aic_sdk import (
     Model,
-    ParameterFixedError,
+    ParameterOutOfRangeError,
     ProcessorAsync,
     ProcessorConfig,
     ProcessorParameter,
@@ -34,6 +34,12 @@ from loguru import logger
 from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
 from pipecat.audio.vad.aic_vad import AICVADAnalyzer
 from pipecat.frames.frames import FilterControlFrame, FilterEnableFrame
+from pipecat.utils.deprecation import deprecated
+
+# Telemetry identifier registered with the AIC SDK; identifies pipecat to the
+# vendor's usage pipeline. Kept private (leading underscore) to avoid making it
+# accidental public API.
+_AIC_SDK_PIPECAT_ID = 6
 
 
 class AICModelManager:
@@ -44,14 +50,14 @@ class AICModelManager:
     acquires on first use and releases when the last reference is dropped.
     """
 
-    _cache: dict[str, Tuple[Model, int]] = {}  # key -> (model, ref_count)
+    _cache: dict[str, tuple[Model, int]] = {}  # key -> (model, ref_count)
     _lock = Lock()
     _loading: dict[
         str, asyncio.Task[Model]
     ] = {}  # key -> load task (deduplicates concurrent loads)
 
     @classmethod
-    def _increment_reference(cls, cache_key: str, entry: Tuple[Model, int]) -> Tuple[Model, str]:
+    def _increment_reference(cls, cache_key: str, entry: tuple[Model, int]) -> tuple[Model, str]:
         """Increment reference count for cached entry. Caller must hold _lock."""
         cached_model, ref_count = entry
         cls._cache[cache_key] = (cached_model, ref_count + 1)
@@ -59,7 +65,7 @@ class AICModelManager:
         return cached_model, cache_key
 
     @classmethod
-    def _store_new_reference(cls, cache_key: str, model: Model) -> Tuple[Model, str]:
+    def _store_new_reference(cls, cache_key: str, model: Model) -> tuple[Model, str]:
         """Store new model in cache with ref count 1. Caller must hold _lock."""
         cls._cache[cache_key] = (model, 1)
         logger.debug(f"AIC model cached key={cache_key!r} ref_count=1")
@@ -70,9 +76,9 @@ class AICModelManager:
         cls,
         cache_key: str,
         *,
-        model_path: Optional[Path] = None,
-        model_id: Optional[str] = None,
-        model_download_dir: Optional[Path] = None,
+        model_path: Path | None = None,
+        model_id: str | None = None,
+        model_download_dir: Path | None = None,
     ) -> Model:
         """Run the actual load (file or download). Separate to allow create_task and deduplication."""
         if model_path is not None:
@@ -94,9 +100,9 @@ class AICModelManager:
     @staticmethod
     def _get_cache_key(
         *,
-        model_path: Optional[Path] = None,
-        model_id: Optional[str] = None,
-        model_download_dir: Optional[Path] = None,
+        model_path: Path | None = None,
+        model_id: str | None = None,
+        model_download_dir: Path | None = None,
     ) -> str:
         """Build a stable cache key for the model.
 
@@ -120,10 +126,10 @@ class AICModelManager:
     async def acquire(
         cls,
         *,
-        model_path: Optional[Path] = None,
-        model_id: Optional[str] = None,
-        model_download_dir: Optional[Path] = None,
-    ) -> Tuple[Model, str]:
+        model_path: Path | None = None,
+        model_id: str | None = None,
+        model_download_dir: Path | None = None,
+    ) -> tuple[Model, str]:
         """Get or load a Model and increment its reference count.
 
         Call this when starting a filter. Store the returned key and pass it
@@ -218,9 +224,10 @@ class AICFilter(BaseAudioFilter):
         self,
         *,
         license_key: str,
-        model_id: Optional[str] = None,
-        model_path: Optional[Path] = None,
-        model_download_dir: Optional[Path] = None,
+        model_id: str | None = None,
+        model_path: Path | None = None,
+        model_download_dir: Path | None = None,
+        enhancement_level: float | None = None,
     ) -> None:
         """Initialize the AIC filter.
 
@@ -232,12 +239,15 @@ class AICFilter(BaseAudioFilter):
                 model_id is ignored and no download occurs.
             model_download_dir: Directory for downloading models as a Path object.
                 Defaults to a cache directory in user's home folder.
+            enhancement_level: Optional overall enhancement strength (0.0..1.0).
+                If None, the model default is used.
 
         Raises:
-            ValueError: If neither model_id nor model_path is provided.
+            ValueError: If neither model_id nor model_path is provided, or if
+                enhancement_level is out of range.
         """
-        # Set SDK ID for telemetry identification (6 = pipecat)
-        set_sdk_id(6)
+        # Set SDK ID for telemetry identification.
+        set_sdk_id(_AIC_SDK_PIPECAT_ID)
 
         if model_id is None and model_path is None:
             raise ValueError(
@@ -245,14 +255,18 @@ class AICFilter(BaseAudioFilter):
                 "See https://artifacts.ai-coustics.io/ for available models."
             )
 
+        if enhancement_level is not None and not 0.0 <= enhancement_level <= 1.0:
+            raise ValueError("'enhancement_level' must be between 0.0 and 1.0.")
+
         self._license_key = license_key
         self._model_id = model_id
         self._model_path = model_path
         self._model_download_dir = model_download_dir or (
             Path.home() / ".cache" / "pipecat" / "aic-models"
         )
-
+        self._enhancement_level = enhancement_level
         self._bypass = False
+
         self._sample_rate = 0
         self._aic_ready = False
         self._frames_per_block = 0
@@ -266,7 +280,7 @@ class AICFilter(BaseAudioFilter):
         )
 
         # AIC SDK objects; model is shared via AICModelManager
-        self._model_cache_key: Optional[str] = None
+        self._model_cache_key: str | None = None
         self._model = None
         self._processor = None
         self._processor_ctx = None
@@ -287,14 +301,22 @@ class AICFilter(BaseAudioFilter):
             raise RuntimeError("AIC processor not initialized yet. Call start(sample_rate) first.")
         return self._vad_ctx
 
+    @deprecated(
+        "`AICFilter.create_vad_analyzer` is deprecated since 1.4.0 and will be removed in 1.6.0. "
+        "Use `AICQuailVADAnalyzer` instead."
+    )
     def create_vad_analyzer(
         self,
         *,
-        speech_hold_duration: Optional[float] = None,
-        minimum_speech_duration: Optional[float] = None,
-        sensitivity: Optional[float] = None,
+        speech_hold_duration: float | None = None,
+        minimum_speech_duration: float | None = None,
+        sensitivity: float | None = None,
     ):
         """Return an analyzer that will lazily instantiate the AIC VAD when ready.
+
+        .. deprecated:: 1.4.0
+            Construct :class:`AICQuailVADAnalyzer` directly instead.
+            Will be removed in 1.6.0.
 
         AIC VAD parameters:
           - speech_hold_duration:
@@ -319,12 +341,40 @@ class AICFilter(BaseAudioFilter):
             A lazily-initialized AICVADAnalyzer that will bind to the VAD context
             once the filter's processor has been created (after start(sample_rate)).
         """
-        return AICVADAnalyzer(
-            vad_context_factory=lambda: self.get_vad_context(),
-            speech_hold_duration=speech_hold_duration,
-            minimum_speech_duration=minimum_speech_duration,
-            sensitivity=sensitivity,
-        )
+        # Suppress AICVADAnalyzer's own DeprecationWarning here — the factory's
+        # warning already informed the caller; emitting both would surface two
+        # warnings for one factory call (and uncaught the inner one before
+        # reaching this return under -W error::DeprecationWarning). Filter on
+        # category alone so a message-text change in AICVADAnalyzer doesn't
+        # break this suppression.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return AICVADAnalyzer(
+                vad_context_factory=lambda: self.get_vad_context(),
+                speech_hold_duration=speech_hold_duration,
+                minimum_speech_duration=minimum_speech_duration,
+                sensitivity=sensitivity,
+            )
+
+    def _apply_enhancement_level(self):
+        """Apply enhancement_level if configured and supported by the active model."""
+        if self._processor_ctx is None or self._enhancement_level is None:
+            return
+
+        try:
+            self._processor_ctx.set_parameter(
+                ProcessorParameter.EnhancementLevel, self._enhancement_level
+            )
+        except ParameterOutOfRangeError as e:
+            logger.warning(f"AIC EnhancementLevel set_parameter out-of-range: {e}")
+            self._enhancement_level = None
+
+    def _apply_bypass(self):
+        """Apply bypass parameter to the active processor."""
+        if self._processor_ctx is None:
+            return
+
+        self._processor_ctx.set_parameter(ProcessorParameter.Bypass, 1.0 if self._bypass else 0.0)
 
     async def start(self, sample_rate: int):
         """Initialize the filter with the transport's sample rate.
@@ -374,22 +424,23 @@ class AICFilter(BaseAudioFilter):
         self._processor_ctx = self._processor.get_processor_context()
         self._vad_ctx = self._processor.get_vad_context()
 
-        # Apply initial parameters
-        try:
-            self._processor_ctx.set_parameter(
-                ProcessorParameter.Bypass, 1.0 if self._bypass else 0.0
-            )
-        except ParameterFixedError as e:
-            logger.error(f"AIC parameter update failed: {e}")
+        # Apply initial control parameters
+        self._apply_bypass()
+        self._apply_enhancement_level()
 
         # Log processor information
         logger.debug(f"ai-coustics filter started:")
         logger.debug(f"  Model ID: {self._model.get_id()}")
         logger.debug(f"  Sample rate: {self._sample_rate} Hz")
         logger.debug(f"  Frames per chunk: {self._frames_per_block}")
+        if self._enhancement_level is not None:
+            logger.debug(f"  Enhancement level: {self._enhancement_level}")
+        else:
+            logger.debug("  Enhancement level not configured; using the model's default behavior.")
         logger.debug(f"  Optimal sample rate: {self._model.get_optimal_sample_rate()} Hz")
         logger.debug(
-            f"  Optimal number of frames for {self._sample_rate} Hz: {self._model.get_optimal_num_frames(self._sample_rate)}"
+            f"  Optimal number of frames for {self._sample_rate} Hz: "
+            f"{self._model.get_optimal_num_frames(self._sample_rate)}"
         )
         logger.debug(
             f"  Output delay: {self._processor_ctx.get_output_delay()} samples "
@@ -430,9 +481,8 @@ class AICFilter(BaseAudioFilter):
             self._bypass = not frame.enable
             if self._processor_ctx is not None:
                 try:
-                    self._processor_ctx.set_parameter(
-                        ProcessorParameter.Bypass, 1.0 if self._bypass else 0.0
-                    )
+                    self._apply_bypass()
+                    self._apply_enhancement_level()
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"AIC set_parameter failed: {e}")
 
@@ -458,13 +508,16 @@ class AICFilter(BaseAudioFilter):
         if num_blocks == 0:
             return b""
 
-        filtered_chunks: List[bytes] = []
-        mv = memoryview(self._audio_buffer)
         block_size = self._frames_per_block * self._bytes_per_sample
+        total_size = num_blocks * block_size
+        blocks_data = bytes(self._audio_buffer[:total_size])
+        self._audio_buffer = self._audio_buffer[total_size:]
+
+        filtered_chunks: list[bytes] = []
 
         for i in range(num_blocks):
             start = i * block_size
-            block_i16 = np.frombuffer(mv[start : start + block_size], dtype=self._dtype)
+            block_i16 = np.frombuffer(blocks_data[start : start + block_size], dtype=self._dtype)
 
             # Reuse input buffer, in-place divide
             np.copyto(self._in_f32[0], block_i16)
@@ -479,5 +532,4 @@ class AICFilter(BaseAudioFilter):
 
             filtered_chunks.append(self._out_i16.tobytes())
 
-        self._audio_buffer = self._audio_buffer[num_blocks * block_size :]
         return b"".join(filtered_chunks)

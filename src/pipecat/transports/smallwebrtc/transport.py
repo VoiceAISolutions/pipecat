@@ -15,7 +15,8 @@ import asyncio
 import fractions
 import time
 from collections import deque
-from typing import Any, Awaitable, Callable, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 
 from pipecat.frames.frames import (
     CancelFrame,
+    ClientConnectedFrame,
     EndFrame,
     Frame,
     InputAudioRawFrame,
@@ -49,8 +51,8 @@ try:
     from av import AudioFrame, AudioResampler, VideoFrame
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use the SmallWebRTC, you need to `pip install pipecat-ai[webrtc]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use the SmallWebRTC, you need to `uv add "pipecat-ai[webrtc]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 CAM_VIDEO_SOURCE = "camera"
 SCREEN_VIDEO_SOURCE = "screenVideo"
@@ -78,14 +80,17 @@ class RawAudioTrack(AudioStreamTrack):
     supporting queued audio data with proper synchronization.
     """
 
-    def __init__(self, sample_rate):
+    def __init__(self, sample_rate: int, auto_silence: bool = True):
         """Initialize the raw audio track.
 
         Args:
             sample_rate: The audio sample rate in Hz.
+            auto_silence: If True, emit silence when the queue is empty. If False,
+                wait until audio data is available.
         """
         super().__init__()
         self._sample_rate = sample_rate
+        self._auto_silence = auto_silence
         self._samples_per_10ms = sample_rate * 10 // 1000
         self._bytes_per_10ms = self._samples_per_10ms * 2  # 16-bit (2 bytes per sample)
         self._timestamp = 0
@@ -122,7 +127,8 @@ class RawAudioTrack(AudioStreamTrack):
         """Return the next audio frame for WebRTC transmission.
 
         Returns:
-            An AudioFrame containing the next audio data or silence.
+            An AudioFrame containing the next audio data, or silence if the queue is empty
+            and ``auto_silence`` is True.
         """
         # Compute required wait time for synchronization
         if self._timestamp > 0:
@@ -130,12 +136,19 @@ class RawAudioTrack(AudioStreamTrack):
             if wait > 0:
                 await asyncio.sleep(wait)
 
-        if self._chunk_queue:
+        if not self._chunk_queue:
+            if self._auto_silence:
+                chunk = bytes(self._bytes_per_10ms)
+            else:
+                while not self._chunk_queue:
+                    await asyncio.sleep(0.005)
+                chunk, future = self._chunk_queue.popleft()
+                if future and not future.done():
+                    future.set_result(True)
+        else:
             chunk, future = self._chunk_queue.popleft()
             if future and not future.done():
                 future.set_result(True)
-        else:
-            chunk = bytes(self._bytes_per_10ms)  # silence
 
         # Convert the byte data to an ndarray of int16 samples
         samples = np.frombuffer(chunk, dtype=np.int16)
@@ -223,9 +236,9 @@ class SmallWebRTCClient:
 
         self._audio_output_track = None
         self._video_output_track = None
-        self._audio_input_track: Optional[AudioStreamTrack] = None
-        self._video_input_track: Optional[VideoStreamTrack] = None
-        self._screen_video_track: Optional[VideoStreamTrack] = None
+        self._audio_input_track: AudioStreamTrack | None = None
+        self._video_input_track: VideoStreamTrack | None = None
+        self._screen_video_track: VideoStreamTrack | None = None
 
         self._params = None
         self._audio_in_channels = None
@@ -302,7 +315,7 @@ class SmallWebRTCClient:
 
             try:
                 frame = await asyncio.wait_for(video_track.recv(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if (
                     self._webrtc_connection.is_connected()
                     and video_track
@@ -312,7 +325,15 @@ class SmallWebRTCClient:
                     # self._webrtc_connection.ask_to_renegotiate()
                 frame = None
             except MediaStreamError:
-                logger.warning("Received an unexpected media stream error while reading the video.")
+                # Track is dead — every subsequent `recv()` would raise the same
+                # error and busy-loop the generator at ~100Hz. Clear the track
+                # reference so the loop parks on the `is None` gate above; a
+                # renegotiation that repopulates the track will resume frames.
+                logger.warning("Media stream error while reading the video; clearing track.")
+                if video_source == CAM_VIDEO_SOURCE:
+                    self._video_input_track = None
+                else:
+                    self._screen_video_track = None
                 frame = None
 
             if frame is None or not isinstance(frame, VideoFrame):
@@ -357,7 +378,7 @@ class SmallWebRTCClient:
 
             try:
                 frame = await asyncio.wait_for(self._audio_input_track.recv(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if (
                     self._webrtc_connection.is_connected()
                     and self._audio_input_track
@@ -366,7 +387,12 @@ class SmallWebRTCClient:
                     logger.warning("Timeout: No audio frame received within the specified time.")
                 frame = None
             except MediaStreamError:
-                logger.warning("Received an unexpected media stream error while reading the audio.")
+                # Track is dead — every subsequent `recv()` would raise the same
+                # error and busy-loop the generator at ~100Hz. Clear the track
+                # reference so the loop parks on the `is None` gate above; a
+                # renegotiation that repopulates the track will resume frames.
+                logger.warning("Media stream error while reading the audio; clearing track.")
+                self._audio_input_track = None
                 frame = None
 
             if frame is None or not isinstance(frame, AudioFrame):
@@ -483,7 +509,10 @@ class SmallWebRTCClient:
         self._video_input_track = self._webrtc_connection.video_input_track()
         self._screen_video_track = self._webrtc_connection.screen_video_input_track()
         if self._params.audio_out_enabled:
-            self._audio_output_track = RawAudioTrack(sample_rate=self._out_sample_rate)
+            self._audio_output_track = RawAudioTrack(
+                sample_rate=self._out_sample_rate,
+                auto_silence=self._params.audio_out_auto_silence,
+            )
             self._webrtc_connection.replace_audio_track(self._audio_output_track)
 
         if self._params.video_out_enabled:
@@ -568,7 +597,7 @@ class SmallWebRTCInputTransport(BaseInputTransport):
         self._receive_audio_task = None
         self._receive_video_task = None
         self._receive_screen_video_task = None
-        self._image_requests: List[UserImageRequestFrame] = []
+        self._image_requests: list[UserImageRequestFrame] = []
 
         # Whether we have seen a StartFrame already.
         self._initialized = False
@@ -690,7 +719,7 @@ class SmallWebRTCInputTransport(BaseInputTransport):
         Args:
             message: The application message to process.
         """
-        logger.debug(f"Received app message inside SmallWebRTCInputTransport  {message}")
+        logger.trace(f"Received app message inside SmallWebRTCInputTransport  {message}")
         await self.broadcast_frame(InputTransportMessageFrame, message=message)
 
     # Add this method similar to DailyInputTransport.request_participant_image
@@ -882,8 +911,8 @@ class SmallWebRTCTransport(BaseTransport):
         self,
         webrtc_connection: SmallWebRTCConnection,
         params: TransportParams,
-        input_name: Optional[str] = None,
-        output_name: Optional[str] = None,
+        input_name: str | None = None,
+        output_name: str | None = None,
     ):
         """Initialize the WebRTC transport.
 
@@ -904,8 +933,8 @@ class SmallWebRTCTransport(BaseTransport):
 
         self._client = SmallWebRTCClient(webrtc_connection, self._callbacks)
 
-        self._input: Optional[SmallWebRTCInputTransport] = None
-        self._output: Optional[SmallWebRTCOutputTransport] = None
+        self._input: SmallWebRTCInputTransport | None = None
+        self._output: SmallWebRTCOutputTransport | None = None
 
         # Register supported handlers. The user will only be able to register
         # these handlers.
@@ -964,6 +993,8 @@ class SmallWebRTCTransport(BaseTransport):
     async def _on_client_connected(self, webrtc_connection):
         """Handle client connection events."""
         await self._call_event_handler("on_client_connected", webrtc_connection)
+        if self._input:
+            await self._input.push_frame(ClientConnectedFrame())
 
     async def _on_client_disconnected(self, webrtc_connection):
         """Handle client disconnection events."""

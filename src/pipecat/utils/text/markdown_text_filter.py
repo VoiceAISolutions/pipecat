@@ -11,7 +11,8 @@ while preserving structure and handling special cases like code blocks and table
 """
 
 import re
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from markdown import Markdown
 from pydantic import BaseModel
@@ -35,13 +36,15 @@ class MarkdownTextFilter(BaseTextFilter):
             enable_text_filter: Whether to apply Markdown filtering. Defaults to True.
             filter_code: Whether to remove code blocks from the text. Defaults to False.
             filter_tables: Whether to remove table content from the text. Defaults to False.
+            filter_repeated_sequences: Whether to remove repeated sequences from the text. Defaults to True.
         """
 
-        enable_text_filter: Optional[bool] = True
-        filter_code: Optional[bool] = False
-        filter_tables: Optional[bool] = False
+        enable_text_filter: bool | None = True
+        filter_code: bool | None = False
+        filter_tables: bool | None = False
+        filter_repeated_sequences: bool | None = True
 
-    def __init__(self, params: Optional[InputParams] = None, **kwargs):
+    def __init__(self, params: InputParams | None = None, **kwargs):
         """Initialize the Markdown text filter.
 
         Args:
@@ -81,7 +84,8 @@ class MarkdownTextFilter(BaseTextFilter):
             filtered_text = re.sub(r"(?<!`)`([^`\n]+)`(?!`)", r"\1", filtered_text)
 
             # Remove repeated sequences of 5 or more characters
-            filtered_text = re.sub(r"(\S)(\1{4,})", "", filtered_text)
+            if self._settings.filter_repeated_sequences:
+                filtered_text = re.sub(r"(\S)(\1{4,})", "", filtered_text)
 
             # Preserve numbered list items with a unique marker, §NUM§
             filtered_text = re.sub(r"^(\d+\.)\s", r"§NUM§\1 ", filtered_text)
